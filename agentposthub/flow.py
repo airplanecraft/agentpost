@@ -223,7 +223,8 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
         grounding["lesson_keys"] = keys
         stamp_applied(store, keys)          # usage: applied_count+1
         print(f"  [grounding] {len(rules)} active lesson(s) loaded")
-    topic = brief.get("notes") or f"China trip, {brief['cities']} cities"
+    topic = brief.get("notes") or \
+        f"China trip, {brief.get('cities', 1)} cities"
     ask = (f"{topic}: {brief['days']} days, budget ${brief['budget_usd']}, "
            f"1 adult. Give a concrete itinerary with a cost breakdown.")
 
@@ -299,7 +300,7 @@ def generate(state: FlowState) -> dict:
         brief_line = notes
     else:
         length_line = "Max 60 words, include the keyword 'China Travel Budget'."
-        brief_line = (f"a China trip: {brief['cities']} cities, "
+        brief_line = (f"a China trip: {brief.get('cities', 1)} cities, "
                       f"{brief['days']} days, 1 adult, "
                       f"budget ${brief['budget_usd']}")
     lessons = ground.get("lessons", [])

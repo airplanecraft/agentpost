@@ -62,8 +62,9 @@ def cmd_run(args) -> int:
           f"(publish_mode={settings.publish_mode})")
     graph.invoke({"task_id": task_id, "trace_id": trace_id,
                   "platform": args.platform,
-                  "brief": {"cities": args.cities, "days": args.days,
+                  "brief": {"days": args.days,
                             "budget_usd": args.budget,
+                            **({"cities": args.cities} if args.cities else {}),
                             **({"notes": args.notes} if args.notes else {})},
                   "platform_results": [], "failures": []},
                   _invoke_cfg(task_id, trace_id))
@@ -248,7 +249,9 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--force", action="store_true",
                        help="explicitly rerun an existing task_id "
                             "(idempotent republish: same idempotency key)")
-    p_run.add_argument("--cities", type=int, default=3)
+    p_run.add_argument("--cities", type=int, default=None,
+                       help="city count for short-form briefs; with --notes "
+                            "the cities come from the notes text instead")
     p_run.add_argument("--days", type=int, default=10)
     p_run.add_argument("--budget", type=int, default=1500)
     p_run.add_argument("--notes", default=None,
