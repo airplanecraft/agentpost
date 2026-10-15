@@ -161,7 +161,7 @@ def publish(platform: str, text: str, req_id: str,
 
     from .tracing import hex_trace_id
     tid = trace_id or hex_trace_id(req_id.split("#", 1)[0])  # task part
-    with span("composio_publish", trace_id=tid,
+    with span("composio_publish", as_type="tool", trace_id=tid,
               metadata={"action": action, "req_id": req_id}):
         payload = _execute(action, _publish_params(platform, text, settings),
                            settings)
@@ -207,7 +207,7 @@ def read_back(platform: str, post_id: str, receipt: dict | None = None,
     from .tracing import hex_trace_id, span
     tid = trace_id or (hex_trace_id(req_id.split("#", 1)[0])
                        if req_id else None)
-    with (span("composio_read_back", trace_id=tid,
+    with (span("composio_read_back", as_type="tool", trace_id=tid,
                metadata={"action": action, "post_id": post_id})
           if tid else contextlib.nullcontext(None)):
         payload = _execute(action, _read_back_params(platform, post_id, settings),

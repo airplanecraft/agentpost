@@ -236,7 +236,11 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
               f"({info.get('failures')} consecutive failures) - skipped")
         return {"grounding": grounding}
 
-    plan = plan_trip(ask, locale="zh")
+    from .tracing import resolve_trace_id, span as trace_span
+    with trace_span("site_planner", as_type="tool",
+                    trace_id=resolve_trace_id(state["task_id"], state),
+                    input=ask[:200]):
+        plan = plan_trip(ask, locale="zh")
     # no_draft is an input-shape problem (the planner asked a clarifying
     # question), not an outage - it must not trip the health breaker
     err = plan.get("error")
@@ -342,7 +346,11 @@ def generate(state: FlowState) -> dict:
                     raise
                 time.sleep(RETRY_BACKOFF_S * attempt)
         if obs is not None:
-            obs.update(output=(msg.get("content") or "")[:300],
+            tool_calls = [{"name": c["function"]["name"],
+                           "args": c["function"]["arguments"][:120]}
+                          for c in (msg.get("tool_calls") or [])]
+            obs.update(output={"text": (msg.get("content") or "")[:300],
+                               "tool_calls": tool_calls},
                        model="deepseek-chat",
                        usage=(None if usage is None else {
                            "input": usage.get("prompt_tokens"),
