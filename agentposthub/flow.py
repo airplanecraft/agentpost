@@ -197,16 +197,54 @@ def get_graph():
 # ------------------------------------------------------------------
 # Nodes: read full state, return a partial update (the patch)
 # ------------------------------------------------------------------
-def retrieve_context(state: FlowState) -> dict:
-    """RAG grounding pack: route facts, exemplars, platform policy.
-    Production: pgvector hybrid retrieval; deterministic pack here."""
+def retrieve_context(state: FlowState, *, store=None) -> dict:
+    """Grounding pack for the generate node. The itinerary facts come
+    from the reference site's own AI planner (POST /api/ai/chat) — the
+    authoritative source — so the model composes copy from real data
+    instead of its imagination.
+
+    Tool health is cross-session memory: the planner's failures are
+    tracked in the Store circuit breaker (agentposthub.breaker), so a
+    planner that failed THRESHOLD times in a row is skipped entirely
+    for the cooldown window — no request is wasted. Outages degrade to
+    a visible marker; the run continues on brief-only facts."""
+    from .tripplanner import plan_trip
+    from .breaker import breaker_open, breaker_record
+    brief = state["brief"]
     grounding = {
-        "facts": [f"{state['brief']['days']} days budget ${state['brief']['budget_usd']}"],
+        "facts": [f"{brief['days']} days budget ${brief['budget_usd']}"],
         "policy": "no outbound links while account trust is building"
                   if state["platform"] == "reddit"
                   else "external link goes into the first comment",
-        "exemplars": ["top_post_v12.html"],
     }
+    topic = brief.get("notes") or f"China trip, {brief['cities']} cities"
+    ask = (f"{topic}: {brief['days']} days, budget ${brief['budget_usd']}, "
+           f"1 adult. Give a concrete itinerary with a cost breakdown.")
+
+    open_, info = breaker_open(store, "site_planner")
+    if open_:
+        grounding["site_plan_error"] = (
+            f"circuit_open (last_error={info.get('last_error')})")
+        print(f"  [grounding] planner circuit open "
+              f"({info.get('failures')} consecutive failures) - skipped")
+        return {"grounding": grounding}
+
+    plan = plan_trip(ask, locale="zh")
+    breaker_record(store, "site_planner", plan["ok"],
+                   plan.get("error"))
+    if plan["ok"]:
+        grounding["site_plan"] = {
+            "total_usd": plan["draft"]["total_usd"] if plan["draft"] else None,
+            "route": plan["draft"]["route_names"] if plan["draft"] else [],
+            "plan_text": plan["reply"][:2000],
+        }
+        print(f"  [grounding] site planner ok "
+              f"(total_usd={grounding['site_plan']['total_usd']}, "
+              f"route={grounding['site_plan']['route']})")
+    else:
+        grounding["site_plan_error"] = plan["error"]
+        print(f"  [grounding] site planner unavailable "
+              f"({plan['error']}) - brief-only facts")
     return {"grounding": grounding}
 
 
@@ -231,6 +269,17 @@ def generate(state: FlowState) -> dict:
         policy_line += (" Images ARE allowed here - call create_image_content "
                         "if (and only if) an image would strengthen the post.")
     notes = brief.get("notes", "")
+    facts = list(ground.get("facts", []))
+    site_plan = ground.get("site_plan")
+    if site_plan:
+        facts.append(
+            "AUTHORITATIVE planner output from the reference site - all "
+            f"numbers must match this, do not invent: total "
+            f"${site_plan['total_usd']}, route {site_plan['route']}. "
+            f"Planner report: {site_plan['plan_text']}")
+    elif ground.get("site_plan_error"):
+        facts.append(f"site planner unavailable ({ground['site_plan_error']}) "
+                     "- mark the plan as estimated")
     if notes:
         # Detailed brief: long-form structured content instead of a teaser
         length_line = ("Produce a concrete itinerary with per-day details and "
@@ -245,7 +294,7 @@ def generate(state: FlowState) -> dict:
                       f"budget ${brief['budget_usd']}")
     prompt = (
         f"Write a {platform} post about {brief_line} "
-        f"Facts to respect: {ground.get('facts', [])}. "
+        f"Facts to respect: {facts}. "
         f"Platform policy: {policy_line} "
         f"Always include the post text itself; the image tool is an optional "
         f"extra on top of it, never a replacement. {length_line}"

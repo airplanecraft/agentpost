@@ -28,6 +28,9 @@ class Settings:
     # optional own image gateway; absent -> stub fallback with notice
     image_gateway_url: str | None = None
 
+    # trip-planner source: the site's own /api/ai/chat agent
+    reference_site: str = "https://1000usdinchina.com"
+
     # storage
     db_path: Path = PROJECT_ROOT / "aph.db"
     store_path: Path = PROJECT_ROOT / "aph_store.db"
@@ -50,6 +53,8 @@ def load_settings() -> Settings:
         publish_mode=(os.environ.get("PUBLISH_MODE") or "dry_run").strip().lower(),
         telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
         image_gateway_url=os.environ.get("IMAGE_GATEWAY_URL"),
+        reference_site=os.environ.get("REFERENCE_SITE_URL",
+                                      "https://1000usdinchina.com"),
         db_path=Path(os.environ.get("APH_DB_PATH") or PROJECT_ROOT / "aph.db"),
         store_path=Path(os.environ.get("APH_STORE_PATH") or PROJECT_ROOT / "aph_store.db"),
     )
