@@ -31,6 +31,11 @@ class Settings:
     # trip-planner source: the site's own /api/ai/chat agent
     reference_site: str = "https://1000usdinchina.com"
 
+    # langfuse tracing (self-hosted by default); unset -> tracing off
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str = "http://localhost:3000"
+
     # storage
     db_path: Path = PROJECT_ROOT / "aph.db"
     store_path: Path = PROJECT_ROOT / "aph_store.db"
@@ -55,6 +60,9 @@ def load_settings() -> Settings:
         image_gateway_url=os.environ.get("IMAGE_GATEWAY_URL"),
         reference_site=os.environ.get("REFERENCE_SITE_URL",
                                       "https://1000usdinchina.com"),
+        langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
+        langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
+        langfuse_host=os.environ.get("LANGFUSE_HOST", "http://localhost:3000"),
         db_path=Path(os.environ.get("APH_DB_PATH") or PROJECT_ROOT / "aph.db"),
         store_path=Path(os.environ.get("APH_STORE_PATH") or PROJECT_ROOT / "aph_store.db"),
     )

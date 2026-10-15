@@ -148,6 +148,7 @@ def publish(platform: str, text: str, req_id: str,
             settings: Settings | None = None) -> dict:
     """Send content to a platform. Returns a dict shaped to satisfy the
     publish output contract: {id, ok, req_id} (+extra metadata)."""
+    from .tracing import span
     settings = settings or get_settings()
     action = PUBLISH_ACTIONS.get(platform)
     if not action:
@@ -157,8 +158,11 @@ def publish(platform: str, text: str, req_id: str,
         return {"id": f"dry_run_{req_id}", "ok": True, "req_id": req_id,
                 "via": "dry-run"}
 
-    payload = _execute(action, _publish_params(platform, text, settings),
-                       settings)
+    trace_id = req_id.split("#", 1)[0]     # req_id = task_id#version
+    with span("composio_publish", trace_id=trace_id,
+              metadata={"action": action, "req_id": req_id}):
+        payload = _execute(action, _publish_params(platform, text, settings),
+                           settings)
     message_id = _find_key(payload, "message_id")
     if payload.get("successful") is not True and message_id is None:
         raise GatewayError(f"publish response missing message_id: "
@@ -177,6 +181,7 @@ def publish(platform: str, text: str, req_id: str,
 
 
 def read_back(platform: str, post_id: str, receipt: dict | None = None,
+              req_id: str | None = None,
               settings: Settings | None = None) -> dict:
     """Independent verification that published content is actually
     visible on the platform (the phantom-publish contract). Returns
@@ -196,8 +201,14 @@ def read_back(platform: str, post_id: str, receipt: dict | None = None,
     if settings.publish_mode == "dry_run":
         return {"visible": True, "reason": "dry-run: nothing was sent"}
 
-    payload = _execute(action, _read_back_params(platform, post_id, settings),
-                       settings)
+    import contextlib
+    from .tracing import span
+    trace_id = (req_id or "").split("#", 1)[0] or None
+    with (span("composio_read_back", trace_id=trace_id,
+               metadata={"action": action, "post_id": post_id})
+          if trace_id else contextlib.nullcontext(None)):
+        payload = _execute(action, _read_back_params(platform, post_id, settings),
+                           settings)
     seen_ids = {str(v) for v in _find_all_keys(payload, "message_id")}
     if post_id in seen_ids:
         return {"visible": True, "reason": "message present in chat history"}

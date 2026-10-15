@@ -40,7 +40,7 @@ def _state_after_publish():
 
 def test_verify_confirms_visible(monkeypatch):
     monkeypatch.setattr(composio, "read_back",
-                        lambda p, i, receipt=None, settings=None: {"visible": True, "reason": "ok"})
+                        lambda p, i, receipt=None, req_id=None, settings=None: {"visible": True, "reason": "ok"})
     out = flow.verify(_state_after_publish())
     assert out["verification"]["ok"] is True
     assert out["verification"]["comment_id"] == "42"
@@ -48,7 +48,7 @@ def test_verify_confirms_visible(monkeypatch):
 
 def test_verify_downgrades_trust_on_removal(monkeypatch):
     monkeypatch.setattr(composio, "read_back",
-                        lambda p, i, receipt=None, settings=None: {"visible": False,
+                        lambda p, i, receipt=None, req_id=None, settings=None: {"visible": False,
                                                                   "reason": "removed_by_mod"})
     store = flow.get_store()
     before = store.get(("account", "telegram"), "trust")

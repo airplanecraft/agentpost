@@ -25,7 +25,10 @@ from .flow import get_db, get_graph
 
 
 def _cfg(task_id: str) -> dict:
-    return {"configurable": {"thread_id": task_id}}
+    from .tracing import observe_config
+    cfg = {"configurable": {"thread_id": task_id}}
+    cfg.update(observe_config(task_id))   # langfuse callbacks when enabled
+    return cfg
 
 
 def cmd_run(args) -> int:
@@ -180,6 +183,23 @@ def cmd_rules(args) -> int:
     return 0
 
 
+def cmd_eval(args) -> int:
+    """Generation eval: N tasks to the approval gate (no publishing),
+    deterministic scoring, Langfuse scores when configured."""
+    from .evalharness import eval_run
+    import time as _t
+    briefs = [{"cities": c, "days": d, "budget_usd": b}
+              for c, d, b in [(3, 10, 1500), (1, 5, 600), (2, 7, 900),
+                              (1, 3, 300), (4, 14, 2500)]][:args.n]
+    session = args.session or str(int(_t.time()))
+    print(f"eval run: {args.n} task(s) on {args.platform} "
+          f"(dry publish, real generation + grounding)")
+    rows = eval_run(get_graph(), args.platform, briefs, session)
+    avg = sum(r["score"] for r in rows) / len(rows) if rows else 0
+    print(f"avg overall: {avg:.3f}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentposthub",
                                      description="AgentPostHub content distribution agent")
@@ -223,6 +243,13 @@ def main(argv: list[str] | None = None) -> int:
     p_dp = sub.add_parser("drop", help="gate #2: give up, record incidents")
     p_dp.add_argument("task_id")
     p_dp.set_defaults(fn=cmd_drop)
+
+    p_ev = sub.add_parser("eval", help="score generations (no publishing)")
+    p_ev.add_argument("--platform", default="telegram")
+    p_ev.add_argument("-n", type=int, default=3)
+    p_ev.add_argument("--session", default=None,
+                      help="eval session label (default: timestamp)")
+    p_ev.set_defaults(fn=cmd_eval)
 
     p_ru = sub.add_parser("rules", help="distilled rule proposals")
     p_ru.add_argument("--all", action="store_true",

@@ -8,3 +8,4 @@ uvicorn>=0.30
 matplotlib>=3.8
 certifi>=2024.0
 pytest>=8.0
+langfuse>=5.0

@@ -319,15 +319,29 @@ def generate(state: FlowState) -> dict:
                      headers={"Authorization": f"Bearer {settings.deepseek_api_key}",
                               "Content-Type": "application/json"})
     msg = None
-    for attempt in range(1, 4):  # transient 5xx/timeout: bounded retry
-        try:
-            with rq.urlopen(req, timeout=30, context=_ssl_ctx()) as resp:
-                msg = json.loads(resp.read())["choices"][0]["message"]
-            break
-        except rq.HTTPError as exc:
-            if exc.code < 500 or attempt == 3:
-                raise
-            time.sleep(RETRY_BACKOFF_S * attempt)
+    usage = None
+    from .tracing import span
+    with span("deepseek_chat", as_type="generation",
+              trace_id=state["task_id"],
+              input=prompt[:300]) as obs:
+        for attempt in range(1, 4):  # transient 5xx/timeout: bounded retry
+            try:
+                with rq.urlopen(req, timeout=30, context=_ssl_ctx()) as resp:
+                    payload = json.loads(resp.read())
+                msg = payload["choices"][0]["message"]
+                usage = payload.get("usage")
+                break
+            except rq.HTTPError as exc:
+                if exc.code < 500 or attempt == 3:
+                    raise
+                time.sleep(RETRY_BACKOFF_S * attempt)
+        if obs is not None:
+            obs.update(output=(msg.get("content") or "")[:300],
+                       model="deepseek-chat",
+                       usage=(None if usage is None else {
+                           "input": usage.get("prompt_tokens"),
+                           "output": usage.get("completion_tokens"),
+                           "total": usage.get("total_tokens")}))
     assert msg is not None
 
     text = (msg.get("content") or "").strip() or "(tool-only response)"
@@ -489,7 +503,8 @@ def verify(state: FlowState, *, store=None) -> dict:
         return {"verification": {"ok": False, "reason": result.get("error")}}
     try:
         live = composio.read_back(state["platform"], str(result["id"]),
-                                  receipt=result.get("receipt"))
+                                  receipt=result.get("receipt"),
+                                  req_id=result.get("req_id"))
     except GatewayError as exc:
         live = {"visible": False, "reason": f"read-back failed: {exc}"}
     if not live.get("visible") and store is not None:
