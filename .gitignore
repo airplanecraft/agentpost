@@ -1,0 +1,14 @@
+# secrets
+.env
+
+# runtime state
+*.db
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# os
+.DS_Store
