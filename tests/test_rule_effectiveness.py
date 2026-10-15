@@ -32,6 +32,7 @@ def test_failure_with_lesson_active_bumps_effectiveness_counter(monkeypatch):
     monkeypatch.setattr(distill, "_deepseek_chat", lambda p, s: "RULE: x\nWHY: y")
     store = _approved()
     state = {"task_id": "t9", "platform": "telegram",
+             "retry_count": flow.MAX_PUBLISH_RETRIES,
              "grounding": {"lesson_keys": ["prop_e"]},
              "failures": [{"node": "publish", "reason": "boom"}]}
     flow.escalate(state, store=store)
@@ -42,9 +43,10 @@ def test_failure_with_lesson_active_bumps_effectiveness_counter(monkeypatch):
 def test_success_with_lesson_does_not_bump_failure_counter():
     store = _approved()
     state = {"task_id": "t10", "platform": "telegram",
+             "retry_count": flow.MAX_PUBLISH_RETRIES,   # no interrupt offer
              "grounding": {"lesson_keys": ["prop_e"]},
              "failures": []}                 # task succeeded -> no stamp
-    flow.escalate(state, store=store)        # (escalate wouldn't even run)
+    flow.escalate(state, store=store)
     rec = store.get(distill.RULE_NS, "prop_e")
     assert rec.value.get("failures_while_applied", 0) == 0
 

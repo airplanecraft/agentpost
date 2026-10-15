@@ -67,9 +67,18 @@ def cmd_list(args) -> int:  # noqa: ARG001
     for task_id, platform in rows:
         snap = graph.get_state(_cfg(task_id))
         if snap.next:  # still suspended
-            draft = snap.values["draft"]
-            print(f"{task_id}  [{platform}]  next={snap.next[0]}")
-            print(f"  draft: {draft['text'][:100]}")
+            gate = snap.next[0]                     # approve | escalate
+            if gate == "escalate":
+                v = snap.values
+                print(f"{task_id}  [{platform}]  next=ESCALATION "
+                      f"(retry {v.get('retry_count', 0)}/{2})")
+                print(f"  failures: {v.get('failures')}")
+                print(f"  retry:  python -m agentposthub retry {task_id}")
+                print(f"  drop:   python -m agentposthub drop {task_id}")
+            else:
+                draft = snap.values["draft"]
+                print(f"{task_id}  [{platform}]  next={gate}")
+                print(f"  draft: {draft['text'][:100]}")
         else:  # ghost index row: clean up
             db.execute("DELETE FROM pending_reviews WHERE task_id=?", (task_id,))
             db.commit()
@@ -87,7 +96,7 @@ def cmd_show(args) -> int:
     return 0
 
 
-def _resume(task_id: str, payload: dict) -> int:
+def _resume(task_id: str, payload: dict, *, gate: str = "decision") -> int:
     graph = get_graph()
     snap = graph.get_state(_cfg(task_id))
     if not snap.next:
@@ -95,7 +104,7 @@ def _resume(task_id: str, payload: dict) -> int:
         return 1
     graph.invoke(Command(resume=payload), _cfg(task_id))
     final = graph.get_state(_cfg(task_id)).values
-    print(f"resumed {task_id} with {payload['decision']}")
+    print(f"resumed {task_id} with {payload[gate]}")
     print(f"verification: {final.get('verification')}")
     print(f"failures:     {final.get('failures')}")
     return 0
@@ -114,6 +123,18 @@ def cmd_edit(args) -> int:
         print("edit requires --text")
         return 1
     return _resume(args.task_id, {"decision": "edited", "text": args.text})
+
+
+def cmd_retry(args) -> int:
+    """Gate #2 resume: re-publish the SAME draft (same idempotency key,
+    platform dedupes) after a failed publish."""
+    return _resume(args.task_id, {"action": "retry"}, gate="action")
+
+
+def cmd_drop(args) -> int:
+    """Gate #2 resume: give up on the task; incidents get recorded and
+    distilled."""
+    return _resume(args.task_id, {"action": "drop"}, gate="action")
 
 
 def cmd_approve_rule(args) -> int:
@@ -195,6 +216,13 @@ def main(argv: list[str] | None = None) -> int:
     p_ed.add_argument("task_id")
     p_ed.add_argument("--text", default=None)
     p_ed.set_defaults(fn=cmd_edit)
+
+    p_rt = sub.add_parser("retry", help="gate #2: re-publish after failure (idempotent)")
+    p_rt.add_argument("task_id")
+    p_rt.set_defaults(fn=cmd_retry)
+    p_dp = sub.add_parser("drop", help="gate #2: give up, record incidents")
+    p_dp.add_argument("task_id")
+    p_dp.set_defaults(fn=cmd_drop)
 
     p_ru = sub.add_parser("rules", help="distilled rule proposals")
     p_ru.add_argument("--all", action="store_true",

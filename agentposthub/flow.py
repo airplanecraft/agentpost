@@ -47,6 +47,8 @@ class FlowState(TypedDict):
     draft: dict                    # generated draft
     approval: str                  # pending|approved|rejected|edited
     regen_count: int               # bounded regeneration counter
+    retry_count: int               # bounded publish retries after failure
+    escalation_action: str         # retry|drop (set by the escalation gate)
     verification: dict             # read-back result
 
     platform_results: Annotated[list[dict], operator.add]
@@ -183,8 +185,8 @@ def get_graph():
     builder.add_edge("policy_validator", "publish")
     builder.add_edge("publish", "verify")
     builder.add_conditional_edges("verify", after_verify)
+    builder.add_conditional_edges("escalate", after_escalate)
     builder.add_edge("record", END)
-    builder.add_edge("escalate", END)
 
     return builder.compile(checkpointer=checkpointer, store=get_store())
 
@@ -528,29 +530,57 @@ def after_approve(state: FlowState) -> Literal["policy_validator", "__end__"]:
     return "policy_validator" if state["approval"] == "approved" else END
 
 
+MAX_PUBLISH_RETRIES = 2
+
+
 def escalate(state: FlowState, *, store=None) -> dict:
-    """Failure exit: incidents are distilled into long-term memory.
-    Each failed task appends its incidents to the Store (cross-session);
-    when enough accumulate, an LLM pass proposes ONE rule — which stays
-    a proposal until a human approves it (design doc: an unactivated
-    rule beats a wrongly-fired one)."""
+    """Gate #2 (design doc section 3.1): a failed publish suspends here
+    instead of dying. The re-activation message (Kafka event, CLI, UI
+    button) resumes the graph: retry re-runs publish with the SAME draft
+    — same idempotency key, so the platform dedupes and nothing
+    double-posts; drop records incidents and ends. Retries are bounded;
+    exhaustion forces the drop path."""
+    attempts = state.get("retry_count", 0)
+    if attempts < MAX_PUBLISH_RETRIES:
+        get_db().execute("INSERT OR REPLACE INTO pending_reviews(task_id, platform) "
+                         "VALUES(?,?)", (state["task_id"], state["platform"]))
+        get_db().commit()
+        decision = interrupt({
+            "ask": "escalation",
+            "task_id": state["task_id"],
+            "failures": state.get("failures", []),
+            "attempts": attempts,
+            "max": MAX_PUBLISH_RETRIES,
+        })
+        if decision["action"] == "retry":
+            get_db().execute("DELETE FROM pending_reviews WHERE task_id=?",
+                             (state["task_id"],))
+            get_db().commit()
+            print(f"  [escalate] re-activated (attempt {attempts + 1}/"
+                  f"{MAX_PUBLISH_RETRIES}) - republishing same draft, "
+                  f"same idempotency key")
+            return {"retry_count": attempts + 1,
+                    "failures": [], "verification": {},
+                    "escalation_action": "retry"}
+    # drop (or retries exhausted): terminal bookkeeping
     from .distill import (maybe_distill, record_incident,
                           stamp_failed_while_applied)
     for f in state.get("failures", []):
         record_incident(store, state["task_id"], state["platform"],
                         f.get("node", "?"), f.get("reason", "?"))
-    # effectiveness loop: this task carried lessons and still failed
     lesson_keys = state.get("grounding", {}).get("lesson_keys", [])
     if lesson_keys and state.get("failures"):
         stamp_failed_while_applied(store, lesson_keys)
-        print(f"  [escalate] task failed while {len(lesson_keys)} "
-              f"lesson(s) were active - effectiveness counters bumped")
     proposal = maybe_distill(store)
     if proposal:
         print(f"  [escalate] rule proposal distilled: "
               f"{proposal['rule'][:70]}... (pending human approval)")
-    print(f"  [escalate] task ended in failure; incidents recorded")
-    return {}
+    print("  [escalate] dropped; incidents recorded")
+    return {"escalation_action": "drop"}
+
+
+def after_escalate(state: FlowState) -> Literal["publish", "__end__"]:
+    return "publish" if state.get("escalation_action") == "retry" else END
 
 
 def after_verify(state: FlowState) -> Literal["record", "escalate"]:

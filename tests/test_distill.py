@@ -102,7 +102,9 @@ def test_grounding_carries_approved_lessons(monkeypatch):
 def test_escalate_node_records_and_distills(monkeypatch):
     store = get_store()
     monkeypatch.setattr(distill, "_deepseek_chat", lambda p, s: LLM_STUB)
+    # retry_count exhausted -> no interrupt, straight to terminal path
     flow.escalate({"task_id": "t9", "platform": "telegram",
+                   "retry_count": flow.MAX_PUBLISH_RETRIES,
                    "failures": [{"node": "publish", "reason": "boom"}]},
                   store=store)
     assert len(distill._undistilled(store)) == 1
