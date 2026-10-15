@@ -36,18 +36,29 @@ class GatewayError(RuntimeError):
 # ------------------------------------------------------------------
 PUBLISH_ACTIONS = {
     "telegram": "TELEGRAM_SEND_MESSAGE",
+    "facebook": "FACEBOOK_CREATE_POST",
 }
 
 READ_BACK_ACTIONS = {
     "telegram": "TELEGRAM_GET_CHAT_HISTORY",
+    "facebook": "FACEBOOK_GET_PAGE_POSTS",
 }
 
 
-def _publish_params(platform: str, text: str, settings: Settings) -> dict:
+def _publish_params(platform: str, text: str, settings: Settings,
+                    link: str | None = None) -> dict:
     if platform == "telegram":
         if not settings.telegram_chat_id:
             raise GatewayError("TELEGRAM_CHAT_ID not set in .env (required for telegram)")
         return {"chat_id": settings.telegram_chat_id, "text": text}
+    if platform == "facebook":
+        if not settings.facebook_page_id:
+            raise GatewayError("FACEBOOK_PAGE_ID not set in .env (required for facebook)")
+        params = {"page_id": settings.facebook_page_id, "message": text,
+                  "published": True}
+        if link:
+            params["link"] = link
+        return params
     raise GatewayError(f"platform {platform!r} not configured for publish yet")
 
 
@@ -56,6 +67,10 @@ def _read_back_params(platform: str, post_id: str, settings: Settings) -> dict:
         if not settings.telegram_chat_id:
             raise GatewayError("TELEGRAM_CHAT_ID not set in .env (required for telegram)")
         return {"chat_id": settings.telegram_chat_id, "limit": 50}
+    if platform == "facebook":
+        if not settings.facebook_page_id:
+            raise GatewayError("FACEBOOK_PAGE_ID not set in .env (required for facebook)")
+        return {"page_id": settings.facebook_page_id, "limit": 25}
     raise GatewayError(f"platform {platform!r} not configured for read-back yet")
 
 
@@ -145,7 +160,7 @@ def _execute(platform_action: str, params: dict, settings: Settings) -> dict:
 # Public gateway API used by the flow nodes
 # ------------------------------------------------------------------
 def publish(platform: str, text: str, req_id: str,
-            trace_id: str | None = None,
+            trace_id: str | None = None, link: str | None = None,
             settings: Settings | None = None) -> dict:
     """Send content to a platform. Returns a dict shaped to satisfy the
     publish output contract: {id, ok, req_id} (+extra metadata)."""
@@ -161,10 +176,8 @@ def publish(platform: str, text: str, req_id: str,
 
     with span("composio_publish", as_type="tool",
               metadata={"action": action, "req_id": req_id}):
-        # created inside the publish node -> OTel context nests it under
-        # publish's span and inherits the task trace; the trace_id param
-        # remains for callers outside any node context
-        payload = _execute(action, _publish_params(platform, text, settings),
+        payload = _execute(action, _publish_params(platform, text, settings,
+                                                   link=link),
                            settings)
     message_id = _find_key(payload, "message_id")
     if payload.get("successful") is not True and message_id is None:

@@ -24,6 +24,7 @@ class Settings:
     # behaviour switches
     publish_mode: str = "dry_run"           # dry_run | live
     telegram_chat_id: str | None = None     # required for live telegram publish
+    facebook_page_id: str | None = None     # your own page; absent -> skip
 
     # optional own image gateway; absent -> stub fallback with notice
     image_gateway_url: str | None = None
@@ -57,6 +58,7 @@ def load_settings() -> Settings:
         composio_mcp_url=s_default_mcp(),
         publish_mode=(os.environ.get("PUBLISH_MODE") or "dry_run").strip().lower(),
         telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
+        facebook_page_id=os.environ.get("FACEBOOK_PAGE_ID"),
         image_gateway_url=os.environ.get("IMAGE_GATEWAY_URL"),
         reference_site=os.environ.get("REFERENCE_SITE_URL",
                                       "https://1000usdinchina.com"),

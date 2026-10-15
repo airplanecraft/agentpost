@@ -38,7 +38,8 @@ def test_publish_gateway_failure_is_bounded(monkeypatch):
 
 
 def test_unconfigured_platform_is_skipped_not_failed():
-    out = flow.platform_publish({"task_id": "t1", "platform": "facebook",
+    # reddit is deliberately gateway-gated (public-community risk)
+    out = flow.platform_publish({"task_id": "t1", "platform": "reddit",
                                  "draft": {"text": "x", "version": 1}})
     assert out["platform_results"][0]["skipped"] is True
     assert out["verifications"][0]["reason"] == "skipped"
