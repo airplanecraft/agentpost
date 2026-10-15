@@ -21,6 +21,7 @@ def isolated_storage(tmp_path, monkeypatch):
     # vars), keeping tests tracing-off even when the developer's .env
     # carries live langfuse keys
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("AGENT_JUDGE", "")        # judge stays off in tests
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
     reset_settings_cache()
     flow.get_db.cache_clear()

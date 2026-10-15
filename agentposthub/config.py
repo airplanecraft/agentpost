@@ -19,6 +19,7 @@ class Settings:
     # secrets / endpoints
     deepseek_api_key: str | None = None
     deepseek_model: str = "deepseek-chat"     # model-swap experiments
+    judge_enabled: bool = False               # AGENT_JUDGE=1: LLM quality judge
     composio_api_key: str | None = None
     composio_mcp_url: str = "https://connect.composio.dev/mcp"
 
@@ -56,6 +57,8 @@ def load_settings() -> Settings:
     s = Settings(
         deepseek_api_key=os.environ.get("DEEPSEEK_API_KEY"),
         deepseek_model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+        judge_enabled=os.environ.get("AGENT_JUDGE", "").strip().lower()
+                      in ("1", "true", "yes"),
         composio_api_key=os.environ.get("COMPOSIO_API_KEY"),
         composio_mcp_url=s_default_mcp(),
         publish_mode=(os.environ.get("PUBLISH_MODE") or "dry_run").strip().lower(),

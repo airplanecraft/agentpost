@@ -76,11 +76,20 @@ def eval_run(graph, platform: str, briefs: list[dict],
         tracing.name_trace(task_id)
         snap = graph.get_state(cfg)
         grounding = snap.values.get("grounding", {})
+        from .config import get_settings as _gs
+        use_judge = _gs().judge_enabled
         for d in snap.values.get("drafts", []) or [{}]:
             draft = d.get("text", "")
             result = evaluate_draft(draft, grounding)
+            if use_judge:
+                from .judge import judge_text
+                v = judge_text(draft, d.get("platform", "?"),
+                               str(brief.get("notes", "")))
+                if v:
+                    result["judge_quality"] = v["score"] / 5.0
+                    result["judge_reason"] = v["reasons"]
             for name, value in result.items():
-                if name != "score":
+                if name not in ("score", "judge_reason"):
                     tracing.score(task_id, name, value)
             tracing.score(task_id, "overall", result["score"])
             row = {"task_id": task_id, "platform": d.get("platform", "?"),
@@ -93,6 +102,7 @@ def eval_run(graph, platform: str, briefs: list[dict],
                   f"overall={row['score']} "
                   f"num={row['number_consistency']} "
                   f"len={row['length_limit']} copy={row['real_copy']} "
+                  f"judge={row.get('judge_quality', '-')} "
                   f"(planner ${row['planner_total']})")
     tracing.flush()
     return rows

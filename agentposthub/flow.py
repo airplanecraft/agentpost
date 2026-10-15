@@ -456,9 +456,15 @@ def approve(state: FlowState) -> dict:
     db.execute("INSERT OR REPLACE INTO pending_reviews(task_id, platform) "
                "VALUES(?,?)", (state["task_id"], platforms))
     db.commit()
+    advisory = None
+    if get_settings().judge_enabled:
+        from .judge import judge_drafts_aggregate
+        notes = str(state.get("brief", {}).get("notes", ""))
+        advisory = judge_drafts_aggregate(state.get("drafts", []), notes)
     decision = interrupt({
         "ask": "approve_drafts",
         "drafts": state.get("drafts", []),
+        "judge": advisory,          # advisory only - the human decides
         "task_id": state["task_id"],
     })
     db.execute("DELETE FROM pending_reviews WHERE task_id=?", (state["task_id"],))
