@@ -118,6 +118,19 @@ def decide_proposal(store, proposal_key: str, approve: bool) -> bool:
     return True
 
 
+def retire_rule(store, rule_key: str) -> bool:
+    """Retire an ACTIVE rule after its root cause is fixed. Retirement is
+    a policy change too, so it only takes effect via this explicit call
+    (CLI) — never automatically. Retired rules stay in the Store as
+    audit history; active_rules stops serving them."""
+    rec = store.get(RULE_NS, rule_key) if store else None
+    if not rec or rec.value.get("status") != "approved":
+        return False
+    store.put(RULE_NS, rule_key, {**rec.value, "status": "retired",
+                                  "retired_at": int(time.time())})
+    return True
+
+
 def list_proposals(store) -> list:
     if not store:
         return []

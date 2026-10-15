@@ -59,6 +59,28 @@ def test_rejected_rule_never_activates():
     assert distill.active_rules(store) == []
 
 
+def test_retire_lifecycle_after_bugfix():
+    """Root cause fixed -> retire -> lesson disappears from active set,
+    record kept as audit history with retired_at."""
+    store = get_store()
+    store.put(distill.RULE_NS, "prop_r",
+              {"rule": "R3", "rationale": "", "status": "approved",
+               "created_at": 0, "incident_keys": []})
+    assert distill.active_rules(store) == ["R3"]
+    assert distill.retire_rule(store, "prop_r") is True
+    assert distill.active_rules(store) == []          # lesson 停止注入
+    rec = store.get(distill.RULE_NS, "prop_r")
+    assert rec.value["status"] == "retired"           # 记录保留可审计
+    assert "retired_at" in rec.value
+    # already retired -> second retire refused (idempotent guard)
+    assert distill.retire_rule(store, "prop_r") is False
+    # pending proposal cannot be retired - reject it instead
+    store.put(distill.RULE_NS, "prop_s",
+              {"rule": "R4", "rationale": "", "status": "pending",
+               "created_at": 0, "incident_keys": []})
+    assert distill.retire_rule(store, "prop_s") is False
+
+
 def test_grounding_carries_approved_lessons(monkeypatch):
     import agentposthub.tripplanner as tp
     monkeypatch.setattr(tp, "plan_trip",

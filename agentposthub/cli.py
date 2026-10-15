@@ -116,18 +116,6 @@ def cmd_edit(args) -> int:
     return _resume(args.task_id, {"decision": "edited", "text": args.text})
 
 
-def cmd_rules(args) -> int:  # noqa: ARG001
-    from .distill import list_proposals
-    proposals = list_proposals(get_graph().store)
-    if not proposals:
-        print("no pending rule proposals")
-        return 0
-    for p in proposals:
-        print(f"{p.key}\n  RULE: {p.value['rule']}\n  WHY:  {p.value.get('rationale','')}\n")
-    print("approve with: python -m agentposthub approve-rule <key>")
-    return 0
-
-
 def cmd_approve_rule(args) -> int:
     from .distill import decide_proposal
     ok = decide_proposal(get_graph().store, args.key, approve=True)
@@ -140,6 +128,31 @@ def cmd_reject_rule(args) -> int:
     ok = decide_proposal(get_graph().store, args.key, approve=False)
     print("rule rejected" if ok else f"no pending proposal {args.key}")
     return 0 if ok else 1
+
+
+def cmd_retire_rule(args) -> int:
+    from .distill import retire_rule
+    ok = retire_rule(get_graph().store, args.key)
+    print(f"rule {args.key} retired (kept as audit history)" if ok
+          else f"no ACTIVE rule {args.key}")
+    return 0 if ok else 1
+
+
+def cmd_rules(args) -> int:
+    from .distill import list_proposals, RULE_NS
+    store = get_graph().store
+    if args.all:
+        for r in (store.search(RULE_NS) or []):
+            print(f"{r.key} [{r.value.get('status')}]  {r.value['rule'][:70]}")
+        return 0
+    proposals = list_proposals(store)
+    if not proposals:
+        print("no pending rule proposals")
+        return 0
+    for p in proposals:
+        print(f"{p.key}\n  RULE: {p.value['rule']}\n  WHY:  {p.value.get('rationale','')}\n")
+    print("approve with: python -m agentposthub approve-rule <key>")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -179,13 +192,19 @@ def main(argv: list[str] | None = None) -> int:
     p_ed.add_argument("--text", default=None)
     p_ed.set_defaults(fn=cmd_edit)
 
-    sub.add_parser("rules", help="list pending distilled rule proposals").set_defaults(fn=cmd_rules)
+    p_ru = sub.add_parser("rules", help="distilled rule proposals")
+    p_ru.add_argument("--all", action="store_true",
+                      help="show every rule incl. approved/rejected/retired")
+    p_ru.set_defaults(fn=cmd_rules)
     p_ar = sub.add_parser("approve-rule", help="human gate: approve a distilled rule")
     p_ar.add_argument("key")
     p_ar.set_defaults(fn=cmd_approve_rule)
     p_rr = sub.add_parser("reject-rule", help="human gate: reject a distilled rule")
     p_rr.add_argument("key")
     p_rr.set_defaults(fn=cmd_reject_rule)
+    p_rt = sub.add_parser("retire-rule", help="retire an active rule (root cause fixed)")
+    p_rt.add_argument("key")
+    p_rt.set_defaults(fn=cmd_retire_rule)
 
     args = parser.parse_args(argv)
     return args.fn(args)
