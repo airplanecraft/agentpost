@@ -86,12 +86,18 @@ def span(name: str, *, as_type: str = "span", input=None,
 
 def score(trace_id: str, name: str, value: float, *,
           session_id: str | None = None, comment: str = "") -> None:
-    """Push an eval score; no-op when tracing is off."""
+    """Push an eval score; no-op when tracing is off.
+
+    Langfuse's API is XOR: a score attaches to a trace_id OR a
+    session_id, never both — sending both rejects the whole ingestion
+    batch server-side, taking the spans down with it."""
     lf = get_client()
     if lf is None:
         return
-    kw = {"trace_id": hex_trace_id(trace_id), "name": name, "value": value}
-    if session_id:
+    kw = {"name": name, "value": value}
+    if trace_id:
+        kw["trace_id"] = hex_trace_id(trace_id)
+    elif session_id:
         kw["session_id"] = session_id
     if comment:
         kw["comment"] = comment[:300]
