@@ -88,3 +88,13 @@ def get_settings() -> Settings:
 def reset_settings_cache() -> None:
     global _settings
     _settings = None
+
+
+def ssl_ctx():
+    """macOS Python lacks system CAs; use certifi's bundle."""
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()

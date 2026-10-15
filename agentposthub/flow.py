@@ -32,7 +32,7 @@ from langgraph.types import Command, interrupt
 
 from . import composio
 from .composio import RETRY_BACKOFF_S, GatewayError
-from .config import Settings, get_settings
+from .config import Settings, get_settings, ssl_ctx
 
 
 class FlowState(TypedDict):
@@ -88,14 +88,7 @@ def tools_for(platform: str, mode: str = "hard") -> list:
     return [CREATE_IMAGE_TOOL]
 
 
-def _ssl_ctx():
-    """macOS Python lacks system CAs; use certifi's bundle."""
-    import ssl
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+_ssl_ctx = ssl_ctx  # legacy internal name kept for imports/tests
 
 
 def _execute_image_tool(args: dict, settings: Settings) -> dict:
@@ -180,6 +173,7 @@ def get_graph():
     builder.add_node("publish", publish)
     builder.add_node("verify", verify)
     builder.add_node("record", record)
+    builder.add_node("escalate", escalate)
 
     builder.add_edge(START, "retrieve_context")
     builder.add_edge("retrieve_context", "generate")
@@ -190,6 +184,7 @@ def get_graph():
     builder.add_edge("publish", "verify")
     builder.add_conditional_edges("verify", after_verify)
     builder.add_edge("record", END)
+    builder.add_edge("escalate", END)
 
     return builder.compile(checkpointer=checkpointer, store=get_store())
 
@@ -210,6 +205,7 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
     a visible marker; the run continues on brief-only facts."""
     from .tripplanner import plan_trip
     from .breaker import breaker_open, breaker_record
+    from .distill import active_rules
     brief = state["brief"]
     grounding = {
         "facts": [f"{brief['days']} days budget ${brief['budget_usd']}"],
@@ -217,6 +213,10 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
                   if state["platform"] == "reddit"
                   else "external link goes into the first comment",
     }
+    lessons = active_rules(store)   # distilled, human-approved lessons
+    if lessons:
+        grounding["lessons"] = lessons
+        print(f"  [grounding] {len(lessons)} active lesson(s) loaded")
     topic = brief.get("notes") or f"China trip, {brief['cities']} cities"
     ask = (f"{topic}: {brief['days']} days, budget ${brief['budget_usd']}, "
            f"1 adult. Give a concrete itinerary with a cost breakdown.")
@@ -292,10 +292,14 @@ def generate(state: FlowState) -> dict:
         brief_line = (f"a China trip: {brief['cities']} cities, "
                       f"{brief['days']} days, 1 adult, "
                       f"budget ${brief['budget_usd']}")
+    lessons = ground.get("lessons", [])
+    lesson_line = (f"Operational lessons from past failures "
+                   f"(obey strictly): {lessons}. ") if lessons else ""
     prompt = (
         f"Write a {platform} post about {brief_line} "
         f"Facts to respect: {facts}. "
         f"Platform policy: {policy_line} "
+        f"{lesson_line}"
         f"Always include the post text itself; the image tool is an optional "
         f"extra on top of it, never a replacement. {length_line}"
     )
@@ -521,6 +525,26 @@ def after_approve(state: FlowState) -> Literal["policy_validator", "__end__"]:
     return "policy_validator" if state["approval"] == "approved" else END
 
 
-def after_verify(state: FlowState) -> Literal["record", "__end__"]:
-    # production: bounded retry (max two, with cooldown) then escalate
-    return "record" if state["verification"]["ok"] else END
+def escalate(state: FlowState, *, store=None) -> dict:
+    """Failure exit: incidents are distilled into long-term memory.
+    Each failed task appends its incidents to the Store (cross-session);
+    when enough accumulate, an LLM pass proposes ONE rule — which stays
+    a proposal until a human approves it (design doc: an unactivated
+    rule beats a wrongly-fired one)."""
+    from .distill import maybe_distill, record_incident
+    for f in state.get("failures", []):
+        record_incident(store, state["task_id"], state["platform"],
+                        f.get("node", "?"), f.get("reason", "?"))
+    proposal = maybe_distill(store)
+    if proposal:
+        print(f"  [escalate] rule proposal distilled: "
+              f"{proposal['rule'][:70]}... (pending human approval)")
+    print(f"  [escalate] task ended in failure; incidents recorded")
+    return {}
+
+
+def after_verify(state: FlowState) -> Literal["record", "escalate"]:
+    # bounded retry (max two, with cooldown) then escalate is the
+    # production path; here failures route to the escalation exit
+    ok = state.get("verification", {}).get("ok")
+    return "record" if ok else "escalate"
