@@ -17,6 +17,7 @@ independent read-back.
 from __future__ import annotations
 
 import hashlib
+import json
 import operator
 import sqlite3
 import time
@@ -229,15 +230,25 @@ def generate(state: FlowState) -> dict:
     if tools:
         policy_line += (" Images ARE allowed here - call create_image_content "
                         "if (and only if) an image would strengthen the post.")
+    notes = brief.get("notes", "")
+    if notes:
+        # Detailed brief: long-form structured content instead of a teaser
+        length_line = ("Produce a concrete itinerary with per-day details and "
+                       "costs for attractions, lodging, food and transport, "
+                       "plus a total. Telegram allows up to 4096 characters - "
+                       "stay under that. Use minimal emoji and clear sections.")
+        brief_line = notes
+    else:
+        length_line = "Max 60 words, include the keyword 'China Travel Budget'."
+        brief_line = (f"a China trip: {brief['cities']} cities, "
+                      f"{brief['days']} days, 1 adult, "
+                      f"budget ${brief['budget_usd']}")
     prompt = (
-        f"Write a short {platform} post about a China trip: "
-        f"{brief['cities']} cities, {brief['days']} days, 1 adult, "
-        f"budget ${brief['budget_usd']}. "
+        f"Write a {platform} post about {brief_line} "
         f"Facts to respect: {ground.get('facts', [])}. "
         f"Platform policy: {policy_line} "
         f"Always include the post text itself; the image tool is an optional "
-        f"extra on top of it, never a replacement. "
-        f"Max 60 words, include the keyword 'China Travel Budget'."
+        f"extra on top of it, never a replacement. {length_line}"
     )
     body = {"model": "deepseek-chat",
             "messages": [{"role": "user", "content": prompt}],
@@ -271,9 +282,38 @@ def generate(state: FlowState) -> dict:
         else:
             impl = TOOL_IMPLS[call["name"]]
             media = impl(json.loads(call["arguments"] or "{}"), settings)
+            if len(text) < 80:
+                # Tool-call turns often carry an announcement ("I'll create
+                # ...") instead of the post itself. Chase with a tool-free
+                # completion so the draft always has real text.
+                text = _complete_text(prompt, settings)
+
     return {"draft": {"text": text, "link": "https://1000usdinchina.com/card?x=1",
                       "media": media, "version": version,
                       "tools_offered": [t["function"]["name"] for t in tools]}}
+
+
+def _complete_text(prompt: str, settings: Settings) -> str:
+    """Tool-free follow-up completion: force the actual post text now that
+    the tool decision (media) has already been captured."""
+    body = {"model": "deepseek-chat",
+            "messages": [{"role": "user",
+                          "content": prompt + "\n\nAnswer with the final post "
+                          "text ONLY - no tool calls, no commentary."}],
+            "max_tokens": 2000}
+    req = rq.Request("https://api.deepseek.com/chat/completions",
+                     data=json.dumps(body).encode(),
+                     headers={"Authorization": f"Bearer {settings.deepseek_api_key}",
+                              "Content-Type": "application/json"})
+    for attempt in range(1, 4):
+        try:
+            with rq.urlopen(req, timeout=60, context=_ssl_ctx()) as resp:
+                return json.loads(resp.read())["choices"][0]["message"]["content"].strip()
+        except rq.HTTPError as exc:
+            if exc.code < 500 or attempt == 3:
+                raise
+            time.sleep(RETRY_BACKOFF_S * attempt)
+    raise RuntimeError("unreachable")
 
 
 def dedup_guard(state: FlowState) -> dict:

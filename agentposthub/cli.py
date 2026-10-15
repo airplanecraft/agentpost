@@ -38,7 +38,8 @@ def cmd_run(args) -> int:
           f"(publish_mode={settings.publish_mode})")
     graph.invoke({"task_id": task_id, "platform": args.platform,
                   "brief": {"cities": args.cities, "days": args.days,
-                            "budget_usd": args.budget},
+                            "budget_usd": args.budget,
+                            **({"notes": args.notes} if args.notes else {})},
                   "platform_results": [], "failures": []}, _cfg(task_id))
 
     snap = graph.get_state(_cfg(task_id))
@@ -128,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--cities", type=int, default=3)
     p_run.add_argument("--days", type=int, default=10)
     p_run.add_argument("--budget", type=int, default=1500)
+    p_run.add_argument("--notes", default=None,
+                       help="free-text brief for long-form content "
+                            "(overrides the short teaser format)")
     p_run.set_defaults(fn=cmd_run)
 
     sub.add_parser("list", help="list tasks waiting at the approval gate").set_defaults(fn=cmd_list)
