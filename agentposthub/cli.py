@@ -143,7 +143,11 @@ def cmd_rules(args) -> int:
     store = get_graph().store
     if args.all:
         for r in (store.search(RULE_NS) or []):
-            print(f"{r.key} [{r.value.get('status')}]  {r.value['rule'][:70]}")
+            v = r.value
+            stats = (f"applied={v.get('applied_count', 0)} "
+                     f"failed_while={v.get('failures_while_applied', 0)} "
+                     if v.get("status") == "approved" else "")
+            print(f"{r.key} [{v.get('status')}] {stats} {v['rule'][:60]}")
         return 0
     proposals = list_proposals(store)
     if not proposals:

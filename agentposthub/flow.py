@@ -205,7 +205,7 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
     a visible marker; the run continues on brief-only facts."""
     from .tripplanner import plan_trip
     from .breaker import breaker_open, breaker_record
-    from .distill import active_rules
+    from .distill import active_rule_records, stamp_applied
     brief = state["brief"]
     grounding = {
         "facts": [f"{brief['days']} days budget ${brief['budget_usd']}"],
@@ -213,10 +213,13 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
                   if state["platform"] == "reddit"
                   else "external link goes into the first comment",
     }
-    lessons = active_rules(store)   # distilled, human-approved lessons
-    if lessons:
-        grounding["lessons"] = lessons
-        print(f"  [grounding] {len(lessons)} active lesson(s) loaded")
+    rules = active_rule_records(store)      # distilled, human-approved
+    if rules:
+        keys = [k for k, _ in rules]
+        grounding["lessons"] = [v["rule"] for _, v in rules]
+        grounding["lesson_keys"] = keys
+        stamp_applied(store, keys)          # usage: applied_count+1
+        print(f"  [grounding] {len(rules)} active lesson(s) loaded")
     topic = brief.get("notes") or f"China trip, {brief['cities']} cities"
     ask = (f"{topic}: {brief['days']} days, budget ${brief['budget_usd']}, "
            f"1 adult. Give a concrete itinerary with a cost breakdown.")
@@ -531,10 +534,17 @@ def escalate(state: FlowState, *, store=None) -> dict:
     when enough accumulate, an LLM pass proposes ONE rule — which stays
     a proposal until a human approves it (design doc: an unactivated
     rule beats a wrongly-fired one)."""
-    from .distill import maybe_distill, record_incident
+    from .distill import (maybe_distill, record_incident,
+                          stamp_failed_while_applied)
     for f in state.get("failures", []):
         record_incident(store, state["task_id"], state["platform"],
                         f.get("node", "?"), f.get("reason", "?"))
+    # effectiveness loop: this task carried lessons and still failed
+    lesson_keys = state.get("grounding", {}).get("lesson_keys", [])
+    if lesson_keys and state.get("failures"):
+        stamp_failed_while_applied(store, lesson_keys)
+        print(f"  [escalate] task failed while {len(lesson_keys)} "
+              f"lesson(s) were active - effectiveness counters bumped")
     proposal = maybe_distill(store)
     if proposal:
         print(f"  [escalate] rule proposal distilled: "

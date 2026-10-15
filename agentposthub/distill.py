@@ -138,9 +138,43 @@ def list_proposals(store) -> list:
             if i.value.get("status") == "pending"]
 
 
-def active_rules(store) -> list[str]:
-    """Approved rule texts — read before every content creation."""
+def active_rule_records(store) -> list:
+    """Approved rules as (key, value) — for injection + usage stamping."""
     if not store:
         return []
-    return [i.value["rule"] for i in store.search(RULE_NS) or []
+    return [(i.key, i.value) for i in store.search(RULE_NS) or []
             if i.value.get("status") == "approved"]
+
+
+def active_rules(store) -> list[str]:
+    """Approved rule texts — read before every content creation."""
+    return [v["rule"] for _, v in active_rule_records(store)]
+
+
+def stamp_applied(store, keys: list[str]) -> None:
+    """Called when lessons are injected into a task's grounding: records
+    that the rule was applied. Usage stats make retirement decisions
+    data-driven instead of guesswork."""
+    for key in keys:
+        rec = store.get(RULE_NS, key) if store else None
+        if not rec or rec.value.get("status") != "approved":
+            continue
+        v = rec.value
+        store.put(RULE_NS, key, {**v,
+                                 "applied_count": v.get("applied_count", 0) + 1,
+                                 "last_applied_at": int(time.time())})
+
+
+def stamp_failed_while_applied(store, keys: list[str]) -> None:
+    """Called from escalate when a task that carried these lessons still
+    failed: the rule was either ignored or is insufficient. This is the
+    effectiveness signal — a rule with a high failures_while_applied
+    ratio deserves human review (retire or rewrite)."""
+    for key in keys:
+        rec = store.get(RULE_NS, key) if store else None
+        if not rec or rec.value.get("status") != "approved":
+            continue
+        v = rec.value
+        store.put(RULE_NS, key, {**v,
+                                 "failures_while_applied":
+                                     v.get("failures_while_applied", 0) + 1})
