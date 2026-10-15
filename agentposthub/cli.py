@@ -44,9 +44,20 @@ def cmd_run(args) -> int:
     settings = get_settings()
     for w in settings.warnings:
         print(f"warning: {w}")
-    task_id = args.task_id or f"task_{args.platform}_{uuid.uuid4().hex[:8]}"
+    task_id = args.task_id or f"task_{args.platform}_{uuid.uuid4().hex[:12]}"
     trace_id = hex_trace_id(task_id)
     graph = get_graph()
+    if args.task_id and not args.force:
+        existing = graph.get_state(_cfg(task_id))
+        if existing.values:
+            print(f"task_id {task_id!r} already has checkpointed state "
+                  f"(task_id is the ledger/checkpoint/trace primary key; "
+                  f"a silent rerun would overwrite the ledger row and "
+                  f"entangle both runs' state).\n"
+                  f"Use a different --task-id, or pass --force for an "
+                  f"intentional idempotent rerun (same idempotency key, "
+                  f"platform dedupes).")
+            return 1
     print(f"running {task_id} on {args.platform} "
           f"(publish_mode={settings.publish_mode})")
     graph.invoke({"task_id": task_id, "trace_id": trace_id,
@@ -234,6 +245,9 @@ def main(argv: list[str] | None = None) -> int:
                        choices=["telegram", "facebook", "reddit"])
     p_run.add_argument("--task-id", default=None,
                        help="stable id for idempotent reruns (default: random)")
+    p_run.add_argument("--force", action="store_true",
+                       help="explicitly rerun an existing task_id "
+                            "(idempotent republish: same idempotency key)")
     p_run.add_argument("--cities", type=int, default=3)
     p_run.add_argument("--days", type=int, default=10)
     p_run.add_argument("--budget", type=int, default=1500)
