@@ -240,6 +240,35 @@ def cmd_eval(args) -> int:
     return 0
 
 
+def cmd_trace(args) -> int:
+    """Print a task's observability tree in TRUE call order (by
+    startTime) from the Langfuse API - the UI list sorts by its own
+    policy and ties within the same millisecond are unstable."""
+    from .tracing import get_client, hex_trace_id, tracing_enabled
+    if not tracing_enabled():
+        print("tracing not configured (LANGFUSE_* keys in .env)")
+        return 1
+    import httpx
+    from .config import get_settings
+    s = get_settings()
+    r = httpx.get(f"{s.langfuse_host}/api/public/observations",
+                  params={"traceId": hex_trace_id(args.task_id), "limit": 50},
+                  auth=(s.langfuse_public_key, s.langfuse_secret_key),
+                  timeout=20)
+    obs = r.json().get("data", [])
+    if not obs:
+        print(f"no observations for {args.task_id} (tracing was off, or "
+              f"the task predates tracing?)")
+        return 1
+    print(f"== {args.task_id} · {len(obs)} observations · true call order ==")
+    for o in sorted(obs, key=lambda x: (x.get("startTime", ""),
+                                         x.get("name", ""))):
+        t = (o.get("startTime") or "")[11:23]
+        print(f"  {t}  [{(o.get('type') or '?'):10}] "
+              f"{o.get('name'):24} {o.get('latency') or ''}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentposthub",
                                      description="AgentPostHub content distribution agent")
@@ -268,6 +297,10 @@ def main(argv: list[str] | None = None) -> int:
     p_show = sub.add_parser("show", help="dump checkpointed state for a task")
     p_show.add_argument("task_id")
     p_show.set_defaults(fn=cmd_show)
+
+    p_tr = sub.add_parser("trace", help="observability tree in true call order")
+    p_tr.add_argument("task_id")
+    p_tr.set_defaults(fn=cmd_trace)
 
     p_ap = sub.add_parser("approve", help="approve the suspended draft")
     p_ap.add_argument("task_id")
