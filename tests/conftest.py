@@ -17,6 +17,11 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     monkeypatch.delenv("IMAGE_GATEWAY_URL", raising=False)
+    # empty-string env beats .env loading (dotenv won't override existing
+    # vars), keeping tests tracing-off even when the developer's .env
+    # carries live langfuse keys
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
     reset_settings_cache()
     flow.get_db.cache_clear()
     flow.get_store.cache_clear()

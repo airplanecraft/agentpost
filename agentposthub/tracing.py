@@ -10,12 +10,19 @@ its DeepSeek generation span land in one trace.
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from contextlib import contextmanager
 
 from .config import get_settings
 
 _client = None
+
+
+def hex_trace_id(task_id: str) -> str:
+    """Langfuse/OTel trace ids must be 32-char hex. Deterministic map
+    from task_id keeps spans, traces and scores correlated."""
+    return hashlib.sha1(task_id.encode()).hexdigest()[:32]
 
 
 def tracing_enabled() -> bool:
@@ -43,7 +50,7 @@ def observe_config(task_id: str) -> dict:
     if not tracing_enabled():
         return {}
     from langfuse.langchain import CallbackHandler
-    handler = CallbackHandler(trace_context={"trace_id": task_id})
+    handler = CallbackHandler(trace_context={"trace_id": hex_trace_id(task_id)})
     return {"callbacks": [handler]}
 
 
@@ -62,7 +69,7 @@ def span(name: str, *, as_type: str = "span", input=None,
     if metadata:
         kw["metadata"] = metadata
     if trace_id:
-        kw["trace_context"] = {"trace_id": trace_id}
+        kw["trace_context"] = {"trace_id": hex_trace_id(trace_id)}
     with lf.start_as_current_observation(**kw) as obs:
         t0 = time.time()
         try:
@@ -83,7 +90,7 @@ def score(trace_id: str, name: str, value: float, *,
     lf = get_client()
     if lf is None:
         return
-    kw = {"trace_id": trace_id, "name": name, "value": value}
+    kw = {"trace_id": hex_trace_id(trace_id), "name": name, "value": value}
     if session_id:
         kw["session_id"] = session_id
     if comment:

@@ -235,8 +235,12 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
         return {"grounding": grounding}
 
     plan = plan_trip(ask, locale="zh")
-    breaker_record(store, "site_planner", plan["ok"],
-                   plan.get("error"))
+    # no_draft is an input-shape problem (the planner asked a clarifying
+    # question), not an outage - it must not trip the health breaker
+    err = plan.get("error")
+    counts_as_failure = plan["ok"] or err in ("rate_limited", "empty_response") \
+        or err.startswith(("http_", "transport:"))
+    breaker_record(store, "site_planner", bool(counts_as_failure), err)
     if plan["ok"]:
         grounding["site_plan"] = {
             "total_usd": plan["draft"]["total_usd"] if plan["draft"] else None,
@@ -354,7 +358,7 @@ def generate(state: FlowState) -> dict:
         else:
             impl = TOOL_IMPLS[call["name"]]
             media = impl(json.loads(call["arguments"] or "{}"), settings)
-            if len(text) < 80:
+            if len(text) < 80 or looks_like_placeholder(text):
                 # Tool-call turns often carry an announcement ("I'll create
                 # ...") instead of the post itself. Chase with a tool-free
                 # completion so the draft always has real text.
@@ -363,6 +367,17 @@ def generate(state: FlowState) -> dict:
     return {"draft": {"text": text, "link": "https://1000usdinchina.com/card?x=1",
                       "media": media, "version": version,
                       "tools_offered": [t["function"]["name"] for t in tools]}}
+
+
+_PLACEHOLDER_MARKS = ("(tool-only response", "(rejected:", "I'll create",
+                      "I will create")
+
+
+def looks_like_placeholder(text: str) -> bool:
+    """True when the text is an announcement ABOUT the post rather than
+    the post itself. Shared by generate (chase a real completion) and
+    the eval harness (real_copy check)."""
+    return any(m in text for m in _PLACEHOLDER_MARKS)
 
 
 def _complete_text(prompt: str, settings: Settings) -> str:

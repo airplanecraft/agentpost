@@ -38,10 +38,10 @@ def check_length(draft_text: str, limit: int = TELEGRAM_MAX) -> float:
 
 def check_placeholder_text(draft_text: str) -> float:
     """The draft must be real post copy, not an announcement ("I'll
-    create...") or a rejected-tool note."""
-    bad = ("(tool-only response", "(rejected:", "I'll create",
-           "I will create")
-    return 0.0 if any(b in draft_text for b in bad) else 1.0
+    create...") or a rejected-tool note. Shares the predicate with the
+    generate-time chase so eval and generation agree on the definition."""
+    from .flow import looks_like_placeholder
+    return 0.0 if looks_like_placeholder(draft_text) else 1.0
 
 
 def evaluate_draft(draft_text: str, grounding: dict) -> dict:
@@ -81,13 +81,14 @@ def eval_run(graph, platform: str, briefs: list[dict],
                               session_id=f"eval_{session_id}")
         tracing.score(task_id, "overall", result["score"],
                       session_id=f"eval_{session_id}")
-        rows.append({"task_id": task_id, **result,
-                     "planner_total": (grounding.get("site_plan") or {}
-                                       ).get("total_usd"),
-                     "draft_head": draft[:60]})
-        print(f"  {task_id}: overall={result['score']} "
-              f"num={result['number_consistency']} "
-              f"len={result['length_limit']} copy={result['real_copy']} "
-              f"(planner ${result.get('planner_total')})")
+        row = {"task_id": task_id, **result,
+               "planner_total": (grounding.get("site_plan") or {}
+                                 ).get("total_usd"),
+               "draft_head": draft[:60]}
+        rows.append(row)
+        print(f"  {row['task_id']}: overall={row['score']} "
+              f"num={row['number_consistency']} "
+              f"len={row['length_limit']} copy={row['real_copy']} "
+              f"(planner ${row['planner_total']})")
     tracing.flush()
     return rows

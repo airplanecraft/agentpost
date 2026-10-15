@@ -70,6 +70,11 @@ def plan_trip(message: str, locale: str = "zh",
 
     if events["draft"] is None and not events["reply"]:
         return {"ok": False, "error": "empty_response"}
+    if events["draft"] is None:
+        # the planner replied but produced no structured plan (usually a
+        # clarification question) - not a usable grounding source
+        return {"ok": False, "error": "no_draft",
+                "reply": "\n".join(events["reply"]).strip()[:200]}
     return {"ok": True,
             "reply": "\n".join(events["reply"]).strip(),
             "draft": events["draft"]}

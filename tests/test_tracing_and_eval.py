@@ -9,8 +9,10 @@ from agentposthub.evalharness import (check_number_consistency,
 # ---- tracing: strict no-op when unconfigured ----
 
 def test_tracing_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
-    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    # empty-string env vars beat .env loading (dotenv keeps existing
+    # vars), so this holds even with live keys in the developer's .env
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
     from agentposthub.config import reset_settings_cache
     reset_settings_cache()
     assert tracing.tracing_enabled() is False

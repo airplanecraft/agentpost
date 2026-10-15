@@ -188,9 +188,18 @@ def cmd_eval(args) -> int:
     deterministic scoring, Langfuse scores when configured."""
     from .evalharness import eval_run
     import time as _t
-    briefs = [{"cities": c, "days": d, "budget_usd": b}
-              for c, d, b in [(3, 10, 1500), (1, 5, 600), (2, 7, 900),
-                              (1, 3, 300), (4, 14, 2500)]][:args.n]
+    # briefs name concrete cities: the site planner asks a clarifying
+    # question when cities are unspecified (caught by the first eval run)
+    briefs = [
+        {"cities": 3, "days": 10, "budget_usd": 1500,
+         "notes": "北京、西安、上海"},
+        {"cities": 1, "days": 5, "budget_usd": 600, "notes": "上海"},
+        {"cities": 2, "days": 7, "budget_usd": 900,
+         "notes": "成都、重庆"},
+        {"cities": 1, "days": 3, "budget_usd": 300, "notes": "广州"},
+        {"cities": 4, "days": 14, "budget_usd": 2500,
+         "notes": "北京、西安、成都、上海"},
+    ][:args.n]
     session = args.session or str(int(_t.time()))
     print(f"eval run: {args.n} task(s) on {args.platform} "
           f"(dry publish, real generation + grounding)")
