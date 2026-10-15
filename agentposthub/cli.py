@@ -60,8 +60,9 @@ def cmd_run(args) -> int:
             return 1
     print(f"running {task_id} on {args.platform} "
           f"(publish_mode={settings.publish_mode})")
+    platforms = [p.strip() for p in args.platform.split(",") if p.strip()]
     graph.invoke({"task_id": task_id, "trace_id": trace_id,
-                  "platform": args.platform,
+                  "platforms": platforms,
                   "brief": {"days": args.days,
                             "budget_usd": args.budget,
                             **({"cities": args.cities} if args.cities else {}),
@@ -141,8 +142,10 @@ def _resume(task_id: str, payload: dict, *, gate: str = "decision") -> int:
     name_trace(task_id)
     final = graph.get_state(_cfg(task_id)).values
     print(f"resumed {task_id} with {payload[gate]}")
-    print(f"verification: {final.get('verification')}")
-    print(f"failures:     {final.get('failures')}")
+    for v in final.get("verifications", []):
+        print(f"  [{v['platform']}] ok={v.get('ok')} "
+              f"{v.get('comment_id') or v.get('reason')}")
+    print(f"failures: {final.get('failures')}")
     return 0
 
 
@@ -278,7 +281,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="start a publish task (suspends at approval)")
     p_run.add_argument("--platform", required=True,
-                       choices=["telegram", "facebook", "reddit"])
+                       help="comma-separated platforms, e.g. "
+                            "telegram,facebook,reddit")
     p_run.add_argument("--task-id", default=None,
                        help="stable id for idempotent reruns (default: random)")
     p_run.add_argument("--force", action="store_true",
