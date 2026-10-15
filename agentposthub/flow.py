@@ -339,7 +339,7 @@ def platform_draft(state: FlowState) -> dict:
                            "(see .env.example) — generation cannot proceed")
 
     prompt, tools = _platform_prompt(platform, brief, ground)
-    body = {"model": "deepseek-chat",
+    body = {"model": settings.deepseek_model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 300}
     if tools:
@@ -371,7 +371,7 @@ def platform_draft(state: FlowState) -> dict:
                           for c in (msg.get("tool_calls") or [])]
             obs.update(output={"text": (msg.get("content") or "")[:300],
                                "tool_calls": tool_calls},
-                       model="deepseek-chat",
+                       model=settings.deepseek_model,
                        usage=(None if usage is None else {
                            "input": usage.get("prompt_tokens"),
                            "output": usage.get("completion_tokens"),
@@ -420,7 +420,7 @@ def looks_like_placeholder(text: str) -> bool:
 def _complete_text(prompt: str, settings: Settings) -> str:
     """Tool-free follow-up completion: force the actual post text now that
     the tool decision (media) has already been captured."""
-    body = {"model": "deepseek-chat",
+    body = {"model": settings.deepseek_model,
             "messages": [{"role": "user",
                           "content": prompt + "\n\nAnswer with the final post "
                           "text ONLY - no tool calls, no commentary."}],

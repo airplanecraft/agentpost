@@ -274,6 +274,17 @@ def cmd_trace(args) -> int:
     return 0
 
 
+def cmd_evalflow(args) -> int:
+    """Flow-level benchmark: scenario suite x whole-graph runs x metrics.
+    Label the run (e.g. the model name) to compare later via --diff."""
+    from .evalflow import diff as ef_diff, run_all
+    if args.diff:
+        ef_diff(args.diff[0], args.diff[1])
+        return 0
+    run_all(args.label)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentposthub",
                                      description="AgentPostHub content distribution agent")
@@ -334,6 +345,13 @@ def main(argv: list[str] | None = None) -> int:
     p_ev.add_argument("--session", default=None,
                       help="eval session label (default: timestamp)")
     p_ev.set_defaults(fn=cmd_eval)
+
+    p_ef = sub.add_parser("evalflow", help="flow-level benchmark harness")
+    p_ef.add_argument("--label", default=None,
+                      help="run label, e.g. the model name (default: model)")
+    p_ef.add_argument("--diff", nargs=2, metavar=("LABEL_A", "LABEL_B"),
+                      help="compare two labelled runs")
+    p_ef.set_defaults(fn=cmd_evalflow)
 
     p_ru = sub.add_parser("rules", help="distilled rule proposals")
     p_ru.add_argument("--all", action="store_true",

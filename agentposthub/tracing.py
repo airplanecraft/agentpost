@@ -124,7 +124,7 @@ def flush() -> None:
         _client.shutdown()
 
 
-def name_trace(task_id: str) -> None:
+def name_trace(task_id: str, session: str | None = None) -> None:
     """Label the trace with the task id so dashboards read like the
     ledger (the trace name otherwise defaults to the first ingested
     observation). Deterministic rename, no LLM - the semantic name was
@@ -136,8 +136,11 @@ def name_trace(task_id: str) -> None:
     try:
         import httpx
         s = get_settings()
+        body = {"id": hex_trace_id(task_id), "name": task_id}
+        if session:
+            body["sessionId"] = session     # experiment grouping
         r = httpx.post(f"{s.langfuse_host}/api/public/traces",
-                       json={"id": hex_trace_id(task_id), "name": task_id},
+                       json=body,
                        auth=(s.langfuse_public_key, s.langfuse_secret_key),
                        timeout=10)
         if r.status_code >= 300:

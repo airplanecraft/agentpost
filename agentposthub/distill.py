@@ -50,7 +50,7 @@ def _undistilled(store) -> list:
 # LLM distillation -> proposal
 # ------------------------------------------------------------------
 def _deepseek_chat(prompt: str, settings: Settings) -> str:
-    body = {"model": "deepseek-chat",
+    body = {"model": get_settings().deepseek_model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 300}
     req = rq.Request("https://api.deepseek.com/chat/completions",
