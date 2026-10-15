@@ -179,9 +179,13 @@ def publish(platform: str, text: str, req_id: str,
         payload = _execute(action, _publish_params(platform, text, settings,
                                                    link=link),
                            settings)
-    message_id = _find_key(payload, "message_id")
+    # platform-specific id: telegram echoes message_id; facebook nests
+    # the post id (data.results[].response.data.id = "<page>_<post>")
+    message_id = (_find_key(payload, "message_id") or
+                  (_find_key(payload, "id") if platform == "facebook"
+                   else None))
     if payload.get("successful") is not True and message_id is None:
-        raise GatewayError(f"publish response missing message_id: "
+        raise GatewayError(f"publish response missing id: "
                            f"{json.dumps(payload)[:300]}")
     # Telegram's Bot API answers sendMessage with the full Message object
     # (message_id, date, chat) straight from Telegram's servers. Keep the
@@ -220,12 +224,18 @@ def read_back(platform: str, post_id: str, receipt: dict | None = None,
     from .tracing import span
     with span("composio_read_back", as_type="tool",
               metadata={"action": action, "post_id": post_id}):
-        # child of verify's span via OTel context; no-op when tracing off
+        # child of the verify worker's span via OTel context; no-op when
+        # tracing is off
         payload = _execute(action, _read_back_params(platform, post_id, settings),
                            settings)
-    seen_ids = {str(v) for v in _find_all_keys(payload, "message_id")}
+    # telegram history items carry message_id; facebook page posts carry
+    # id (graph-style "<page>_<post>")
+    id_keys = ("message_id",) if platform == "telegram" else ("id", "post_id")
+    seen_ids = set()
+    for k in id_keys:
+        seen_ids |= {str(v) for v in _find_all_keys(payload, k)}
     if post_id in seen_ids:
-        return {"visible": True, "reason": "message present in chat history"}
+        return {"visible": True, "reason": "post present in recent page history"}
     if seen_ids:
         return {"visible": False,
                 "reason": f"message {post_id} not found in recent chat history "
