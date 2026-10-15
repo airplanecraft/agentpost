@@ -145,6 +145,7 @@ def _execute(platform_action: str, params: dict, settings: Settings) -> dict:
 # Public gateway API used by the flow nodes
 # ------------------------------------------------------------------
 def publish(platform: str, text: str, req_id: str,
+            trace_id: str | None = None,
             settings: Settings | None = None) -> dict:
     """Send content to a platform. Returns a dict shaped to satisfy the
     publish output contract: {id, ok, req_id} (+extra metadata)."""
@@ -158,8 +159,9 @@ def publish(platform: str, text: str, req_id: str,
         return {"id": f"dry_run_{req_id}", "ok": True, "req_id": req_id,
                 "via": "dry-run"}
 
-    trace_id = req_id.split("#", 1)[0]     # req_id = task_id#version
-    with span("composio_publish", trace_id=trace_id,
+    from .tracing import hex_trace_id
+    tid = trace_id or hex_trace_id(req_id.split("#", 1)[0])  # task part
+    with span("composio_publish", trace_id=tid,
               metadata={"action": action, "req_id": req_id}):
         payload = _execute(action, _publish_params(platform, text, settings),
                            settings)
@@ -181,7 +183,7 @@ def publish(platform: str, text: str, req_id: str,
 
 
 def read_back(platform: str, post_id: str, receipt: dict | None = None,
-              req_id: str | None = None,
+              req_id: str | None = None, trace_id: str | None = None,
               settings: Settings | None = None) -> dict:
     """Independent verification that published content is actually
     visible on the platform (the phantom-publish contract). Returns
@@ -202,11 +204,12 @@ def read_back(platform: str, post_id: str, receipt: dict | None = None,
         return {"visible": True, "reason": "dry-run: nothing was sent"}
 
     import contextlib
-    from .tracing import span
-    trace_id = (req_id or "").split("#", 1)[0] or None
-    with (span("composio_read_back", trace_id=trace_id,
+    from .tracing import hex_trace_id, span
+    tid = trace_id or (hex_trace_id(req_id.split("#", 1)[0])
+                       if req_id else None)
+    with (span("composio_read_back", trace_id=tid,
                metadata={"action": action, "post_id": post_id})
-          if trace_id else contextlib.nullcontext(None)):
+          if tid else contextlib.nullcontext(None)):
         payload = _execute(action, _read_back_params(platform, post_id, settings),
                            settings)
     seen_ids = {str(v) for v in _find_all_keys(payload, "message_id")}

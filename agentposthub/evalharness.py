@@ -67,8 +67,10 @@ def eval_run(graph, platform: str, briefs: list[dict],
     for brief in briefs:
         task_id = f"eval_{session_id}_{len(rows):02d}"
         cfg = {"configurable": {"thread_id": task_id}}
-        cfg.update(tracing.observe_config(task_id))
-        graph.invoke({"task_id": task_id, "platform": platform,
+        cfg.update(tracing.observe_config(tracing.hex_trace_id(task_id)))
+        graph.invoke({"task_id": task_id,
+                      "trace_id": tracing.hex_trace_id(task_id),
+                      "platform": platform,
                       "brief": brief, "platform_results": [],
                       "failures": []}, cfg)
         snap = graph.get_state(cfg)

@@ -46,7 +46,7 @@ def test_failed_publish_suspends_then_retry_completes(monkeypatch):
     req_id_first = (f"retry_e2e#{snap.values['draft']['version']}")
 
     monkeypatch.setattr(gw, "publish",
-                        lambda p, t, r, settings=None: {"id": "77", "ok": True,
+                        lambda p, t, r, trace_id=None, settings=None: {"id": "77", "ok": True,
                                                         "req_id": r})
     from langgraph.types import Command
     graph.invoke(Command(resume={"action": "retry"}), cfg)

@@ -40,6 +40,7 @@ class FlowState(TypedDict):
     reducer; parallel-collected fields declare append reducers so Send
     fan-out results never clobber each other."""
     task_id: str
+    trace_id: str                  # observability key, persisted with state
     platform: str                  # telegram | facebook | reddit
     brief: dict                    # route brief: cities/days/budget
 
@@ -324,9 +325,9 @@ def generate(state: FlowState) -> dict:
                               "Content-Type": "application/json"})
     msg = None
     usage = None
-    from .tracing import span
+    from .tracing import resolve_trace_id, span
     with span("deepseek_chat", as_type="generation",
-              trace_id=state["task_id"],
+              trace_id=resolve_trace_id(state["task_id"], state),
               input=prompt[:300]) as obs:
         for attempt in range(1, 4):  # transient 5xx/timeout: bounded retry
             try:
@@ -492,7 +493,8 @@ def publish(state: FlowState) -> dict:
     it is treated as success."""
     req_id = f"{state['task_id']}#{state['draft']['version']}"
     try:
-        resp = composio.publish(state["platform"], state["draft"]["text"], req_id)
+        resp = composio.publish(state["platform"], state["draft"]["text"], req_id,
+                                trace_id=state.get("trace_id"))
     except GatewayError as exc:
         print(f"  [publish] gateway failure: {exc}")
         return {"platform_results": [{"platform": state["platform"], "ok": False,
@@ -519,7 +521,8 @@ def verify(state: FlowState, *, store=None) -> dict:
     try:
         live = composio.read_back(state["platform"], str(result["id"]),
                                   receipt=result.get("receipt"),
-                                  req_id=result.get("req_id"))
+                                  req_id=result.get("req_id"),
+                                  trace_id=state.get("trace_id"))
     except GatewayError as exc:
         live = {"visible": False, "reason": f"read-back failed: {exc}"}
     if not live.get("visible") and store is not None:

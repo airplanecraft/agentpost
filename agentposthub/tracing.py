@@ -25,6 +25,18 @@ def hex_trace_id(task_id: str) -> str:
     return hashlib.sha1(task_id.encode()).hexdigest()[:32]
 
 
+def resolve_trace_id(task_id: str, state_values: dict | None = None) -> str:
+    """The trace id is a first-class constraint key: written into
+    FlowState at task creation and persisted by the checkpointer, so a
+    resume days later reads the SAME id out of the checkpoint instead
+    of re-deriving it. Derivation from task_id remains as the fallback
+    for states created before the field existed (and for direct
+    graph.invoke callers)."""
+    if state_values and state_values.get("trace_id"):
+        return state_values["trace_id"]
+    return hex_trace_id(task_id)
+
+
 def tracing_enabled() -> bool:
     s = get_settings()
     return bool(s.langfuse_public_key and s.langfuse_secret_key)
@@ -44,13 +56,14 @@ def get_client():
     return _client
 
 
-def observe_config(task_id: str) -> dict:
-    """LangGraph invoke config carrying the callback handler, with the
-    trace pinned to task_id so manual spans join the same trace."""
+def observe_config(trace_id: str) -> dict:
+    """LangGraph invoke config carrying the callback handler. Takes the
+    RESOLVED hex trace id (see resolve_trace_id) — callers that know the
+    task's persisted trace_id pass it; creators pass hex_trace_id()."""
     if not tracing_enabled():
         return {}
     from langfuse.langchain import CallbackHandler
-    handler = CallbackHandler(trace_context={"trace_id": hex_trace_id(task_id)})
+    handler = CallbackHandler(trace_context={"trace_id": trace_id})
     return {"callbacks": [handler]}
 
 
@@ -58,7 +71,9 @@ def observe_config(task_id: str) -> dict:
 def span(name: str, *, as_type: str = "span", input=None,
          trace_id: str | None = None, metadata: dict | None = None):
     """Manual span for calls the callback handler cannot see (raw
-    urllib/httpx). No-op when tracing is off."""
+    urllib/httpx). No-op when tracing is off. `trace_id` must ALREADY be
+    32-hex (use resolve_trace_id / hex_trace_id) — it is attached
+    verbatim, never re-hashed."""
     lf = get_client()
     if lf is None:
         yield None
@@ -69,7 +84,7 @@ def span(name: str, *, as_type: str = "span", input=None,
     if metadata:
         kw["metadata"] = metadata
     if trace_id:
-        kw["trace_context"] = {"trace_id": hex_trace_id(trace_id)}
+        kw["trace_context"] = {"trace_id": trace_id}
     with lf.start_as_current_observation(**kw) as obs:
         t0 = time.time()
         try:

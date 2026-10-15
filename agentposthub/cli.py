@@ -25,25 +25,37 @@ from .flow import get_db, get_graph
 
 
 def _cfg(task_id: str) -> dict:
-    from .tracing import observe_config
-    cfg = {"configurable": {"thread_id": task_id}}
-    cfg.update(observe_config(task_id))   # langfuse callbacks when enabled
+    return {"configurable": {"thread_id": task_id}}
+
+
+def _invoke_cfg(task_id: str, trace_id: str | None = None,
+                snap_values: dict | None = None) -> dict:
+    """Invoke config = routing + observability. The trace id is the
+    persisted constraint key from FlowState when resuming (read out of
+    the checkpoint), or freshly derived at task creation."""
+    from .tracing import observe_config, resolve_trace_id
+    cfg = _cfg(task_id)
+    cfg.update(observe_config(resolve_trace_id(task_id, snap_values)))
     return cfg
 
 
 def cmd_run(args) -> int:
+    from .tracing import hex_trace_id
     settings = get_settings()
     for w in settings.warnings:
         print(f"warning: {w}")
     task_id = args.task_id or f"task_{args.platform}_{uuid.uuid4().hex[:8]}"
+    trace_id = hex_trace_id(task_id)
     graph = get_graph()
     print(f"running {task_id} on {args.platform} "
           f"(publish_mode={settings.publish_mode})")
-    graph.invoke({"task_id": task_id, "platform": args.platform,
+    graph.invoke({"task_id": task_id, "trace_id": trace_id,
+                  "platform": args.platform,
                   "brief": {"cities": args.cities, "days": args.days,
                             "budget_usd": args.budget,
                             **({"notes": args.notes} if args.notes else {})},
-                  "platform_results": [], "failures": []}, _cfg(task_id))
+                  "platform_results": [], "failures": []},
+                  _invoke_cfg(task_id, trace_id))
 
     snap = graph.get_state(_cfg(task_id))
     if snap.next and "approve" in snap.next:
@@ -105,7 +117,10 @@ def _resume(task_id: str, payload: dict, *, gate: str = "decision") -> int:
     if not snap.next:
         print(f"task {task_id} is not suspended (next={snap.next or 'done'})")
         return 1
-    graph.invoke(Command(resume=payload), _cfg(task_id))
+    # the trace id travels INSIDE the checkpointed state: days later, a
+    # different process still joins the exact same observability tree
+    graph.invoke(Command(resume=payload),
+                 _invoke_cfg(task_id, snap_values=snap.values))
     final = graph.get_state(_cfg(task_id)).values
     print(f"resumed {task_id} with {payload[gate]}")
     print(f"verification: {final.get('verification')}")

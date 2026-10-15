@@ -9,7 +9,7 @@ BASE = {"task_id": "t1", "platform": "telegram", "brief": {},
 
 def test_publish_success_contract_ok(monkeypatch):
     monkeypatch.setattr(composio, "publish",
-                        lambda p, t, r, settings=None: {"id": "42", "ok": True,
+                        lambda p, t, r, trace_id=None, settings=None: {"id": "42", "ok": True,
                                                         "req_id": "t1#1"})
     out = flow.publish(dict(BASE))
     assert out["platform_results"][0]["id"] == "42"
@@ -17,7 +17,7 @@ def test_publish_success_contract_ok(monkeypatch):
 
 def test_publish_contract_violation_records_failure(monkeypatch):
     monkeypatch.setattr(composio, "publish",
-                        lambda p, t, r, settings=None: {"idd": "42", "ok": "true"})
+                        lambda p, t, r, trace_id=None, settings=None: {"idd": "42", "ok": "true"})
     out = flow.publish(dict(BASE))
     assert out["platform_results"][0]["ok"] is False
     assert out["failures"][0]["node"] == "publish"
@@ -40,7 +40,7 @@ def _state_after_publish():
 
 def test_verify_confirms_visible(monkeypatch):
     monkeypatch.setattr(composio, "read_back",
-                        lambda p, i, receipt=None, req_id=None, settings=None: {"visible": True, "reason": "ok"})
+                        lambda p, i, receipt=None, req_id=None, trace_id=None, settings=None: {"visible": True, "reason": "ok"})
     out = flow.verify(_state_after_publish())
     assert out["verification"]["ok"] is True
     assert out["verification"]["comment_id"] == "42"
@@ -48,7 +48,7 @@ def test_verify_confirms_visible(monkeypatch):
 
 def test_verify_downgrades_trust_on_removal(monkeypatch):
     monkeypatch.setattr(composio, "read_back",
-                        lambda p, i, receipt=None, req_id=None, settings=None: {"visible": False,
+                        lambda p, i, receipt=None, req_id=None, trace_id=None, settings=None: {"visible": False,
                                                                   "reason": "removed_by_mod"})
     store = flow.get_store()
     before = store.get(("account", "telegram"), "trust")
