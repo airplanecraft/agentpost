@@ -70,6 +70,8 @@ def cmd_run(args) -> int:
                   _invoke_cfg(task_id, trace_id))
 
     snap = graph.get_state(_cfg(task_id))
+    from .tracing import name_trace
+    name_trace(task_id)
     if snap.next and "approve" in snap.next:
         draft = snap.values["draft"]
         print(f"\nsuspended at the approval gate (next node: {snap.next[0]})")
@@ -124,6 +126,7 @@ def cmd_show(args) -> int:
 
 
 def _resume(task_id: str, payload: dict, *, gate: str = "decision") -> int:
+    from .tracing import name_trace
     graph = get_graph()
     snap = graph.get_state(_cfg(task_id))
     if not snap.next:
@@ -133,6 +136,7 @@ def _resume(task_id: str, payload: dict, *, gate: str = "decision") -> int:
     # different process still joins the exact same observability tree
     graph.invoke(Command(resume=payload),
                  _invoke_cfg(task_id, snap_values=snap.values))
+    name_trace(task_id)
     final = graph.get_state(_cfg(task_id)).values
     print(f"resumed {task_id} with {payload[gate]}")
     print(f"verification: {final.get('verification')}")

@@ -122,3 +122,25 @@ def score(trace_id: str, name: str, value: float, *,
 def flush() -> None:
     if _client is not None:
         _client.shutdown()
+
+
+def name_trace(task_id: str) -> None:
+    """Label the trace with the task id so dashboards read like the
+    ledger (the trace name otherwise defaults to the first ingested
+    observation). Deterministic rename, no LLM - the semantic name was
+    already chosen when the task was created. No-op when tracing off;
+    tolerant: a failed rename never breaks a run."""
+    lf = get_client()
+    if lf is None:
+        return
+    try:
+        import httpx
+        s = get_settings()
+        r = httpx.post(f"{s.langfuse_host}/api/public/traces",
+                       json={"id": hex_trace_id(task_id), "name": task_id},
+                       auth=(s.langfuse_public_key, s.langfuse_secret_key),
+                       timeout=10)
+        if r.status_code >= 300:
+            print(f"  [tracing] trace rename skipped (HTTP {r.status_code})")
+    except Exception as exc:  # noqa: BLE001 - cosmetic, never fatal
+        print(f"  [tracing] trace rename failed: {str(exc)[:60]}")

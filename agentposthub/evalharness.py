@@ -73,6 +73,7 @@ def eval_run(graph, platform: str, briefs: list[dict],
                       "platform": platform,
                       "brief": brief, "platform_results": [],
                       "failures": []}, cfg)
+        tracing.name_trace(task_id)
         snap = graph.get_state(cfg)
         draft = snap.values.get("draft", {}).get("text", "")
         grounding = snap.values.get("grounding", {})
