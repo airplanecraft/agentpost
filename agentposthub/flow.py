@@ -28,7 +28,7 @@ from typing import Annotated, Literal, TypedDict
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.store.sqlite import SqliteStore
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Send, interrupt
 
 from . import composio
 from .composio import RETRY_BACKOFF_S, GatewayError
@@ -41,18 +41,18 @@ class FlowState(TypedDict):
     fan-out results never clobber each other."""
     task_id: str
     trace_id: str                  # observability key, persisted with state
-    platform: str                  # telegram | facebook | reddit
-    brief: dict                    # route brief: cities/days/budget
+    platforms: list                # target platforms for this task
+    brief: dict                    # route brief: cities/days/budget/notes
 
-    grounding: dict                # RAG grounding pack
-    draft: dict                    # generated draft
+    grounding: dict                # RAG grounding pack (shared, fetched once)
+    drafts: Annotated[list[dict], operator.add]   # one per platform (Send)
     approval: str                  # pending|approved|rejected|edited
-    regen_count: int               # bounded regeneration counter
     retry_count: int               # bounded publish retries after failure
     escalation_action: str         # retry|drop (set by the escalation gate)
-    verification: dict             # read-back result
+    retry_platforms: list          # failed platforms targeted by a retry
 
     platform_results: Annotated[list[dict], operator.add]
+    verifications: Annotated[list[dict], operator.add]
     failures: Annotated[list[dict], operator.add]
 
 
@@ -77,9 +77,12 @@ CREATE_IMAGE_TOOL = {
 # Hard rule: tool visibility gating. Red-line platforms never see the
 # tool, so the model physically cannot order it.
 PLATFORM_RULES = {
-    "reddit":   {"allow_image": False},
-    "facebook": {"allow_image": True},
-    "telegram": {"allow_image": True},
+    # hard rules, enforced structurally: reddit never sees the image
+    # tool (visibility gating) and never carries an outbound link
+    # (stripped in code, never trusted to the prompt)
+    "reddit":   {"allow_image": False, "allow_link": False},
+    "facebook": {"allow_image": True,  "allow_link": True},
+    "telegram": {"allow_image": True,  "allow_link": True},
 }
 
 
@@ -169,25 +172,25 @@ def get_graph():
                                                check_same_thread=False))
     builder = StateGraph(FlowState)
     builder.add_node("retrieve_context", retrieve_context)
-    builder.add_node("generate", generate)
-    builder.add_node("dedup_guard", dedup_guard)
+    builder.add_node("platform_draft", platform_draft)
     builder.add_node("approve", approve)
-    builder.add_node("policy_validator", policy_validator)
-    builder.add_node("publish", publish)
-    builder.add_node("verify", verify)
-    builder.add_node("record", record)
+    builder.add_node("platform_publish", platform_publish)
     builder.add_node("escalate", escalate)
+    builder.add_node("record_all", record_all)
 
     builder.add_edge(START, "retrieve_context")
-    builder.add_edge("retrieve_context", "generate")
-    builder.add_edge("generate", "dedup_guard")
-    builder.add_conditional_edges("dedup_guard", after_dedup)
-    builder.add_conditional_edges("approve", after_approve)
-    builder.add_edge("policy_validator", "publish")
-    builder.add_edge("publish", "verify")
-    builder.add_conditional_edges("verify", after_verify)
-    builder.add_conditional_edges("escalate", after_escalate)
-    builder.add_edge("record", END)
+    builder.add_conditional_edges("retrieve_context", route_drafts,
+                                  ["platform_draft"])
+    builder.add_edge("platform_draft", "approve")
+    builder.add_conditional_edges("approve", after_approve,
+                                  ["platform_publish", END])
+    builder.add_edge("platform_publish", "record_all")
+    # record_all writes the ledger, then routes: any failure -> the
+    # batch escalation gate; clean sweep -> END
+    builder.add_conditional_edges("record_all", after_harvest,
+                                  ["escalate", END])
+    builder.add_conditional_edges("escalate", after_escalate,
+                                  ["platform_publish", END])
 
     return builder.compile(checkpointer=checkpointer, store=get_store())
 
@@ -196,6 +199,8 @@ def get_graph():
 # Nodes: read full state, return a partial update (the patch)
 # ------------------------------------------------------------------
 def retrieve_context(state: FlowState, *, store=None) -> dict:
+    """Also normalizes legacy single-platform input ("platform": "x")
+    into the multi-platform list."""
     """Grounding pack for the generate node. The itinerary facts come
     from the reference site's own AI planner (POST /api/ai/chat) — the
     authoritative source — so the model composes copy from real data
@@ -212,9 +217,7 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
     brief = state["brief"]
     grounding = {
         "facts": [f"{brief['days']} days budget ${brief['budget_usd']}"],
-        "policy": "no outbound links while account trust is building"
-                  if state["platform"] == "reddit"
-                  else "external link goes into the first comment",
+        "policy": "external link goes into the first comment",
     }
     rules = active_rule_records(store)      # distilled, human-approved
     if rules:
@@ -234,7 +237,9 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
             f"circuit_open (last_error={info.get('last_error')})")
         print(f"  [grounding] planner circuit open "
               f"({info.get('failures')} consecutive failures) - skipped")
-        return {"grounding": grounding}
+        platforms = state.get("platforms") or (
+            [state["platform"]] if state.get("platform") else [])
+        return {"grounding": grounding, "platforms": platforms}
 
     from .tracing import span as trace_span
     with trace_span("site_planner", as_type="tool",
@@ -262,29 +267,24 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
         grounding["site_plan_error"] = plan["error"]
         print(f"  [grounding] site planner unavailable "
               f"({plan['error']}) - brief-only facts")
-    return {"grounding": grounding}
+    platforms = state.get("platforms") or (
+        [state["platform"]] if state.get("platform") else [])
+    return {"grounding": grounding, "platforms": platforms}
 
 
-def generate(state: FlowState) -> dict:
-    """The single model-led node. Real DeepSeek call with tool choice.
-    Tool menu is pre-filtered by the hard rule; remaining tools are
-    offered with tool_choice=auto so the model decides autonomously
-    (soft rule)."""
-    import json
-    settings = get_settings()
-    version = state.get("draft", {}).get("version", 0) + 1
-    platform, brief = state["platform"], state["brief"]
-    ground = state.get("grounding", {})
-
-    if not settings.deepseek_api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY missing: add it to .env "
-                           "(see .env.example) — generation cannot proceed")
-
+def _platform_prompt(platform: str, brief: dict, ground: dict) -> tuple[str, list]:
+    """Platform-specific prompt assembly. Hard rules are structural:
+    the image tool is simply not on reddit's menu (visibility gating)
+    and the link policy line matches the platform rule table."""
     tools = tools_for(platform, mode="hard")
     policy_line = ground.get("policy", "")
-    if tools:
+    rules = PLATFORM_RULES.get(platform, {})
+    if rules.get("allow_image") and tools:
         policy_line += (" Images ARE allowed here - call create_image_content "
                         "if (and only if) an image would strengthen the post.")
+    if not rules.get("allow_link", True):
+        policy_line += (" This platform forbids outbound links: the post text "
+                        "must contain NO URLs and NO link mentions.")
     notes = brief.get("notes", "")
     facts = list(ground.get("facts", []))
     site_plan = ground.get("site_plan")
@@ -298,11 +298,10 @@ def generate(state: FlowState) -> dict:
         facts.append(f"site planner unavailable ({ground['site_plan_error']}) "
                      "- mark the plan as estimated")
     if notes:
-        # Detailed brief: long-form structured content instead of a teaser
         length_line = ("Produce a concrete itinerary with per-day details and "
                        "costs for attractions, lodging, food and transport, "
-                       "plus a total. Telegram allows up to 4096 characters - "
-                       "stay under that. Use minimal emoji and clear sections.")
+                       "plus a total. Stay under 4096 characters. Minimal "
+                       "emoji, clear sections.")
         brief_line = notes
     else:
         length_line = "Max 60 words, include the keyword 'China Travel Budget'."
@@ -320,6 +319,26 @@ def generate(state: FlowState) -> dict:
         f"Always include the post text itself; the image tool is an optional "
         f"extra on top of it, never a replacement. {length_line}"
     )
+    return prompt, tools
+
+
+def platform_draft(state: FlowState) -> dict:
+    """Worker agent: one Send instance per platform. The same brief
+    becomes a DIFFERENT draft per platform - reddit gets a text-only
+    prompt with no image tool on the menu and a no-link policy line;
+    facebook/telegram may earn media via the model's own tool choice.
+    Real DeepSeek call with tool_choice=auto (soft rule on top of the
+    hard structural rules)."""
+    import json
+    settings = get_settings()
+    platform, brief = state["platform"], state["brief"]
+    ground = state.get("grounding", {})
+
+    if not settings.deepseek_api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY missing: add it to .env "
+                           "(see .env.example) — generation cannot proceed")
+
+    prompt, tools = _platform_prompt(platform, brief, ground)
     body = {"model": "deepseek-chat",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 300}
@@ -334,7 +353,7 @@ def generate(state: FlowState) -> dict:
     usage = None
     from .tracing import span
     with span("deepseek_chat", as_type="generation",
-              input=prompt[:300]) as obs:   # child of generate's span
+              input=prompt[:300]) as obs:   # child of platform_draft's span
         for attempt in range(1, 4):  # transient 5xx/timeout: bounded retry
             try:
                 with rq.urlopen(req, timeout=30, context=_ssl_ctx()) as resp:
@@ -364,20 +383,27 @@ def generate(state: FlowState) -> dict:
     if msg.get("tool_calls"):
         call = msg["tool_calls"][0]["function"]
         if call["name"] not in TOOL_IMPLS:
-            # model hallucinated a tool that is not on the menu
             text = f"(rejected: unknown tool '{call['name']}')"
         else:
             impl = TOOL_IMPLS[call["name"]]
             media = impl(json.loads(call["arguments"] or "{}"), settings)
             if len(text) < 80 or looks_like_placeholder(text):
-                # Tool-call turns often carry an announcement ("I'll create
-                # ...") instead of the post itself. Chase with a tool-free
-                # completion so the draft always has real text.
                 text = _complete_text(prompt, settings)
 
-    return {"draft": {"text": text, "link": "https://1000usdinchina.com/card?x=1",
-                      "media": media, "version": version,
-                      "tools_offered": [t["function"]["name"] for t in tools]}}
+    # inline dedup watermark (semantic layer is a stub; hash/regen kept
+    # simple inside the worker - full waterfall is future pgvector work)
+    if _semantic_similarity(text) > 0.92:
+        text += " [variant]"
+
+    allow_link = PLATFORM_RULES.get(platform, {}).get("allow_link", True)
+    draft = {"platform": platform, "text": text,
+             "link": "https://1000usdinchina.com/card?x=1" if allow_link else None,
+             "media": media, "version": 1,
+             "tools_offered": [t["function"]["name"] for t in tools]}
+    print(f"  [draft:{platform}] {len(text)} chars, "
+          f"media={'yes' if media else 'no'}, "
+          f"link={'yes' if draft['link'] else 'no'}")
+    return {"drafts": [draft]}
 
 
 _PLACEHOLDER_MARKS = ("(tool-only response", "(rejected:", "I'll create",
@@ -386,8 +412,8 @@ _PLACEHOLDER_MARKS = ("(tool-only response", "(rejected:", "I'll create",
 
 def looks_like_placeholder(text: str) -> bool:
     """True when the text is an announcement ABOUT the post rather than
-    the post itself. Shared by generate (chase a real completion) and
-    the eval harness (real_copy check)."""
+    the post itself. Shared by platform_draft (chase a real completion)
+    and the eval harness (real_copy check)."""
     return any(m in text for m in _PLACEHOLDER_MARKS)
 
 
@@ -414,24 +440,6 @@ def _complete_text(prompt: str, settings: Settings) -> str:
     raise RuntimeError("unreachable")
 
 
-def dedup_guard(state: FlowState) -> dict:
-    """Three-layer waterfall: target id -> content hash -> semantic
-    similarity. Near-duplicate drafts are bounced back for regeneration,
-    bounded by the counter (escalation on exhaustion).
-    Semantic layer is a fixed low score until pgvector lands; hash and
-    regen bounding are live."""
-    draft_text = state["draft"]["text"]
-    similarity = _semantic_similarity(draft_text)
-    if similarity > 0.92:
-        if state.get("regen_count", 0) >= 2:
-            return {"failures": [{"node": "dedup_guard",
-                                  "reason": "regeneration budget exhausted"}]}
-        return {"regen_count": state.get("regen_count", 0) + 1,
-                "draft": {**state["draft"],
-                          "text": draft_text + f" [variant {similarity:.2f}]"}}
-    return {}
-
-
 def _semantic_similarity(text: str) -> float:
     """Production: embed draft, search recent same-platform posts in
     pgvector, return top-1 cosine similarity. Placeholder until then."""
@@ -439,44 +447,28 @@ def _semantic_similarity(text: str) -> float:
 
 
 def approve(state: FlowState) -> dict:
-    """Human gate. interrupt() suspends the whole graph; the state is
-    persisted by the checkpointer and can hang for minutes or days.
-    Before suspending we insert a pending-review row so any surface
-    (CLI, API) can list waiting items with a plain SQL query; after
-    resume we delete it. INSERT OR REPLACE keeps the re-execution on
-    resume idempotent."""
+    """Human gate over ALL platform drafts at once. interrupt() suspends
+    the whole graph; the state is persisted by the checkpointer and can
+    hang for minutes or days. INSERT OR REPLACE keeps the re-execution
+    on resume idempotent."""
     db = get_db()
+    platforms = ",".join(state.get("platforms") or ["?"])
     db.execute("INSERT OR REPLACE INTO pending_reviews(task_id, platform) "
-               "VALUES(?,?)", (state["task_id"], state["platform"]))
+               "VALUES(?,?)", (state["task_id"], platforms))
     db.commit()
     decision = interrupt({
-        "ask": "approve_draft",
-        "draft": state["draft"],
-        "platform": state["platform"],
+        "ask": "approve_drafts",
+        "drafts": state.get("drafts", []),
         "task_id": state["task_id"],
     })
     db.execute("DELETE FROM pending_reviews WHERE task_id=?", (state["task_id"],))
     db.commit()
     if decision["decision"] == "edited":
-        return {"approval": "approved",
-                "draft": {**state["draft"], "text": decision["text"]}}
+        texts = decision.get("texts") or {}
+        drafts = [{**d, "text": texts.get(d["platform"], d["text"])}
+                  for d in state.get("drafts", [])]
+        return {"approval": "approved", "drafts": drafts}
     return {"approval": decision["decision"]}
-
-
-def policy_validator(state: FlowState, *, store=None) -> dict:
-    """Hard-rule checks in code, never trusting model output. The
-    trust-building strip is driven by long-term memory (Store), not a
-    hardcoded platform check — memory influencing decisions, live."""
-    draft = dict(state["draft"])
-    tier = "established"
-    if store is not None:
-        rec = store.get(("account", state["platform"]), "trust")
-        tier = rec.value["tier"] if rec else "established"
-        print(f"  [memory] trust tier ({state['platform']}) = {tier}")
-    if tier == "building":
-        draft["link"] = None
-        draft["stripped_by"] = "memory:trust=building"
-    return {"draft": draft}
 
 
 def _check_output_contract(resp: dict, sent_req_id: str) -> str | None:
@@ -497,96 +489,151 @@ def _check_output_contract(resp: dict, sent_req_id: str) -> str | None:
     return None
 
 
-def publish(state: FlowState) -> dict:
-    """Platform publish through the Composio MCP gateway with an
-    idempotency key; the response must pass the output contract before
-    it is treated as success."""
-    req_id = f"{state['task_id']}#{state['draft']['version']}"
-    try:
-        resp = composio.publish(state["platform"], state["draft"]["text"], req_id,
-                                trace_id=state.get("trace_id"))
-    except GatewayError as exc:
-        print(f"  [publish] gateway failure: {exc}")
-        return {"platform_results": [{"platform": state["platform"], "ok": False,
-                                      "error": str(exc)}],
-                "failures": [{"node": "publish", "reason": str(exc)}]}
+def platform_publish(state: FlowState, *, store=None) -> dict:
+    """Worker agent: one Send instance per platform. Inlines the whole
+    per-platform chain - hard-rule strip -> MCP publish (idempotency
+    key) -> output contract -> independent read-back -> trust memory.
+    Platforms without gateway configuration are SKIPPED with a visible
+    reason (skipped is not failed: no incidents, no retry)."""
+    platform = state["platform"]
+    draft = dict(state["draft"])
+    task_id = state["task_id"]
 
+    # hard rules in code, never trusting model output
+    if not PLATFORM_RULES.get(platform, {}).get("allow_link", True):
+        draft["link"] = None
+        draft["stripped_by"] = "platform_rule:no_link"
+    if store is not None:
+        rec = store.get(("account", platform), "trust")
+        tier = rec.value["tier"] if rec else "established"
+        print(f"  [memory] trust tier ({platform}) = {tier}")
+        if tier == "building":
+            draft["link"] = None
+            draft["stripped_by"] = (draft.get("stripped_by", "") +
+                                    "+memory:trust=building")
+
+    from . import composio as gw
+    if platform not in gw.PUBLISH_ACTIONS:
+        print(f"  [publish:{platform}] skipped - gateway action not "
+              f"configured for this platform")
+        return {"platform_results": [{"platform": platform, "skipped": True,
+                                      "ok": True,
+                                      "reason": "gateway_not_configured"}],
+                "verifications": [{"platform": platform, "ok": True,
+                                   "reason": "skipped"}]}
+
+    req_id = f"{task_id}#{draft.get('version', 1)}"
+    try:
+        resp = gw.publish(platform, draft["text"], req_id)
+    except GatewayError as exc:
+        print(f"  [publish:{platform}] gateway failure: {exc}")
+        return {"platform_results": [{"platform": platform, "ok": False,
+                                      "error": str(exc)}],
+                "verifications": [{"platform": platform, "ok": False,
+                                   "reason": str(exc)}],
+                "failures": [{"platform": platform, "node": "platform_publish",
+                              "reason": str(exc),
+                              "attempt": state.get("retry_count", 0)}]}
     violation = _check_output_contract(resp, req_id)
     if violation:
-        print(f"  [contract] output contract violation: {violation}")
-        return {"platform_results": [{"platform": state["platform"], "ok": False,
+        print(f"  [contract:{platform}] output contract violation: {violation}")
+        return {"platform_results": [{"platform": platform, "ok": False,
                                       "error": f"output_contract: {violation}"}],
-                "failures": [{"node": "publish", "reason": violation}]}
-    return {"platform_results": [{"platform": state["platform"], **resp}]}
+                "verifications": [{"platform": platform, "ok": False,
+                                   "reason": violation}],
+                "failures": [{"platform": platform, "node": "platform_publish",
+                              "reason": violation,
+                              "attempt": state.get("retry_count", 0)}]}
 
-
-def verify(state: FlowState, *, store=None) -> dict:
-    """Post-execution read-back: the phantom-publish contract. Success
-    is confirmed against the platform, never assumed from the tool
-    response. A detected removal distills into long-term memory (trust
-    downgrade), closing the memory loop for the next decision."""
-    result = state["platform_results"][-1]
-    if not result.get("ok", True):
-        return {"verification": {"ok": False, "reason": result.get("error")}}
+    # phantom-publish contract: confirm, never assume
     try:
-        live = composio.read_back(state["platform"], str(result["id"]),
-                                  receipt=result.get("receipt"),
-                                  req_id=result.get("req_id"),
-                                  trace_id=state.get("trace_id"))
+        live = gw.read_back(platform, str(resp["id"]), receipt=resp.get("receipt"),
+                            req_id=req_id)
     except GatewayError as exc:
         live = {"visible": False, "reason": f"read-back failed: {exc}"}
     if not live.get("visible") and store is not None:
-        rec = store.get(("account", state["platform"]), "trust")
+        rec = store.get(("account", platform), "trust")
         current = rec.value if rec else {"tier": "established", "incidents": 0}
-        store.put(("account", state["platform"]), "trust",
-                  {"tier": "building", "incidents": current.get("incidents", 0) + 1})
-        print(f"  [memory] removal detected -> trust downgraded in store "
-              f"(incidents={current.get('incidents', 0) + 1})")
-    return {"verification": {"ok": bool(live.get("visible")),
-                             "comment_id": result["id"],
-                             "reason": live.get("reason", "")}}
+        store.put(("account", platform), "trust",
+                  {"tier": "building",
+                   "incidents": current.get("incidents", 0) + 1})
+        print(f"  [memory] removal detected on {platform} -> trust "
+              f"downgraded (incidents={current.get('incidents', 0) + 1})")
+    ok = bool(live.get("visible"))
+    return {"platform_results": [{"platform": platform, **resp}],
+            "verifications": [{"platform": platform, "ok": ok,
+                               "comment_id": resp["id"],
+                               "reason": live.get("reason", "")}],
+            **({} if ok else {"failures": [
+                {"platform": platform, "node": "platform_publish",
+                 "reason": f"read-back: {live.get('reason')}",
+                 "attempt": state.get("retry_count", 0)}]})}
 
 
-def record(state: FlowState) -> dict:
-    """Idempotent ledger write (primary key task_id + platform)."""
+def record_all(state: FlowState) -> dict:
+    """Idempotent ledger write per verified platform (PK task+platform)."""
     db = get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO publish_history(task_id, platform, post_ref, verified) "
-        "VALUES(?,?,?,?)",
-        (state["task_id"], state["platform"],
-         state["verification"].get("comment_id"), 1))
+    for v in state.get("verifications", []):
+        if v.get("ok") and v.get("comment_id"):
+            db.execute(
+                "INSERT OR REPLACE INTO publish_history(task_id, platform, "
+                "post_ref, verified) VALUES(?,?,?,1)",
+                (state["task_id"], v["platform"], v["comment_id"]))
+            print(f"  [record] {state['task_id']} -> {v['platform']} "
+                  f"({v['comment_id']})")
     db.commit()
-    print(f"  [record] ok: {state['task_id']} -> {state['platform']}")
 
 
 # ------------------------------------------------------------------
-# Conditional edges: routing reads the ledger, returns the next node
+# Fan-out routing: the supervisor decisions (no manual selection)
 # ------------------------------------------------------------------
-def after_dedup(state: FlowState) -> Literal["generate", "approve"]:
-    if state.get("regen_count", 0) > 0 and \
-            state["draft"]["text"].count("[variant") < state.get("regen_count", 0):
-        return "generate"
-    return "approve"
+def route_drafts(state: FlowState):
+    """After grounding, fan out one draft worker per target platform."""
+    platforms = state.get("platforms") or []
+    return [Send("platform_draft", {
+        "task_id": state["task_id"], "trace_id": state.get("trace_id", ""),
+        "platform": p, "brief": state["brief"],
+        "grounding": state.get("grounding", {})})
+        for p in platforms]
 
 
-def after_approve(state: FlowState) -> Literal["policy_validator", "__end__"]:
-    return "policy_validator" if state["approval"] == "approved" else END
+def after_approve(state: FlowState):
+    """Gate #1 decision: rejected ends the task; approved fans the
+    per-platform publish workers out in parallel."""
+    if state.get("approval") != "approved":
+        return END
+    return [Send("platform_publish", {
+        "task_id": state["task_id"], "trace_id": state.get("trace_id", ""),
+        "platform": d["platform"], "draft": d,
+        "retry_count": state.get("retry_count", 0)})
+        for d in state.get("drafts", [])]
+
+
+def after_harvest(state: FlowState) -> Literal["escalate", "__end__"]:
+    """Join point after all publish workers (record_all already ran and
+    wrote the ledger for every verified platform). failures is an
+    append-only audit channel that cannot be cleared on retry, so only
+    entries from the CURRENT attempt generation count for routing."""
+    rc = state.get("retry_count", 0)
+    current = [f for f in state.get("failures", [])
+               if f.get("attempt", 0) == rc]
+    return "escalate" if current else END
 
 
 MAX_PUBLISH_RETRIES = 2
 
 
 def escalate(state: FlowState, *, store=None) -> dict:
-    """Gate #2 (design doc section 3.1): a failed publish suspends here
-    instead of dying. The re-activation message (Kafka event, CLI, UI
-    button) resumes the graph: retry re-runs publish with the SAME draft
-    — same idempotency key, so the platform dedupes and nothing
-    double-posts; drop records incidents and ends. Retries are bounded;
-    exhaustion forces the drop path."""
+    """Gate #2 (design doc section 3.1): failed publishes suspend here
+    instead of dying - one BATCH gate for all failed platforms. retry
+    re-Sends only the failed platforms with the SAME drafts (same
+    idempotency keys, the platforms dedupe, nothing double-posts);
+    drop records incidents and distills. Retries bounded; exhaustion
+    forces the drop path."""
     attempts = state.get("retry_count", 0)
     if attempts < MAX_PUBLISH_RETRIES:
         get_db().execute("INSERT OR REPLACE INTO pending_reviews(task_id, platform) "
-                         "VALUES(?,?)", (state["task_id"], state["platform"]))
+                         "VALUES(?,?)", (state["task_id"], "escalation"))
         get_db().commit()
         decision = interrupt({
             "ask": "escalation",
@@ -599,17 +646,18 @@ def escalate(state: FlowState, *, store=None) -> dict:
             get_db().execute("DELETE FROM pending_reviews WHERE task_id=?",
                              (state["task_id"],))
             get_db().commit()
+            failed = sorted({f.get("platform") for f in state.get("failures", [])
+                             if f.get("platform")} - {None})
             print(f"  [escalate] re-activated (attempt {attempts + 1}/"
-                  f"{MAX_PUBLISH_RETRIES}) - republishing same draft, "
-                  f"same idempotency key")
+                  f"{MAX_PUBLISH_RETRIES}) - republishing {failed}")
             return {"retry_count": attempts + 1,
-                    "failures": [], "verification": {},
+                    "retry_platforms": failed,
                     "escalation_action": "retry"}
     # drop (or retries exhausted): terminal bookkeeping
     from .distill import (maybe_distill, record_incident,
                           stamp_failed_while_applied)
     for f in state.get("failures", []):
-        record_incident(store, state["task_id"], state["platform"],
+        record_incident(store, state["task_id"], f.get("platform", "?"),
                         f.get("node", "?"), f.get("reason", "?"))
     lesson_keys = state.get("grounding", {}).get("lesson_keys", [])
     if lesson_keys and state.get("failures"):
@@ -622,12 +670,16 @@ def escalate(state: FlowState, *, store=None) -> dict:
     return {"escalation_action": "drop"}
 
 
-def after_escalate(state: FlowState) -> Literal["publish", "__end__"]:
-    return "publish" if state.get("escalation_action") == "retry" else END
+def after_escalate(state: FlowState):
+    """retry re-Sends ONLY the failed platforms (their drafts unchanged,
+    idempotency keys unchanged)."""
+    if state.get("escalation_action") != "retry":
+        return END
+    failed = state.get("retry_platforms") or []
+    drafts = {d["platform"]: d for d in state.get("drafts", [])}
+    return [Send("platform_publish", {
+        "task_id": state["task_id"], "trace_id": state.get("trace_id", ""),
+        "platform": p, "draft": drafts[p],
+        "retry_count": state.get("retry_count", 0)})
+        for p in failed if p in drafts]
 
-
-def after_verify(state: FlowState) -> Literal["record", "escalate"]:
-    # bounded retry (max two, with cooldown) then escalate is the
-    # production path; here failures route to the escalation exit
-    ok = state.get("verification", {}).get("ok")
-    return "record" if ok else "escalate"

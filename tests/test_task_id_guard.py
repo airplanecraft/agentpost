@@ -7,10 +7,11 @@ from agentposthub import flow
 
 
 def _patch(monkeypatch):
-    monkeypatch.setattr(flow, "generate",
-                        lambda s: {"draft": {"text": "post", "version": 1,
-                                             "link": None, "media": None,
-                                             "tools_offered": []}})
+    monkeypatch.setattr(flow, "platform_draft",
+                        lambda s: {"drafts": [{
+                            "platform": s["platform"], "text": "post",
+                            "version": 1, "link": None, "media": None,
+                            "tools_offered": []}]})
     monkeypatch.setattr(tp, "plan_trip",
                         lambda *a, **k: {"ok": False, "error": "offline"})
 

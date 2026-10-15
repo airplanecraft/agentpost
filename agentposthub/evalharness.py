@@ -70,28 +70,29 @@ def eval_run(graph, platform: str, briefs: list[dict],
         cfg.update(tracing.observe_config(tracing.hex_trace_id(task_id)))
         graph.invoke({"task_id": task_id,
                       "trace_id": tracing.hex_trace_id(task_id),
-                      "platform": platform,
+                      "platforms": [platform],
                       "brief": brief, "platform_results": [],
                       "failures": []}, cfg)
         tracing.name_trace(task_id)
         snap = graph.get_state(cfg)
-        draft = snap.values.get("draft", {}).get("text", "")
         grounding = snap.values.get("grounding", {})
-        result = evaluate_draft(draft, grounding)
-        for name, value in result.items():
-            if name != "score":
-                tracing.score(task_id, name, value,
-                              session_id=f"eval_{session_id}")
-        tracing.score(task_id, "overall", result["score"],
-                      session_id=f"eval_{session_id}")
-        row = {"task_id": task_id, **result,
-               "planner_total": (grounding.get("site_plan") or {}
-                                 ).get("total_usd"),
-               "draft_head": draft[:60]}
-        rows.append(row)
-        print(f"  {row['task_id']}: overall={row['score']} "
-              f"num={row['number_consistency']} "
-              f"len={row['length_limit']} copy={row['real_copy']} "
-              f"(planner ${row['planner_total']})")
+        for d in snap.values.get("drafts", []) or [{}]:
+            draft = d.get("text", "")
+            result = evaluate_draft(draft, grounding)
+            for name, value in result.items():
+                if name != "score":
+                    tracing.score(task_id, name, value)
+            tracing.score(task_id, "overall", result["score"])
+            row = {"task_id": task_id, "platform": d.get("platform", "?"),
+                   **result,
+                   "planner_total": (grounding.get("site_plan") or {}
+                                     ).get("total_usd"),
+                   "draft_head": draft[:60]}
+            rows.append(row)
+            print(f"  {row['task_id']}[{row['platform']}]: "
+                  f"overall={row['score']} "
+                  f"num={row['number_consistency']} "
+                  f"len={row['length_limit']} copy={row['real_copy']} "
+                  f"(planner ${row['planner_total']})")
     tracing.flush()
     return rows

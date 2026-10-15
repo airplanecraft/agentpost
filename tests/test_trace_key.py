@@ -18,10 +18,11 @@ def test_resolve_prefers_persisted_state_over_derivation():
 def test_trace_id_survives_into_checkpoint(monkeypatch):
     import agentposthub.tripplanner as tp
     from agentposthub import flow
-    monkeypatch.setattr(flow, "generate",
-                        lambda s: {"draft": {"text": "post", "version": 1,
-                                             "link": None, "media": None,
-                                             "tools_offered": []}})
+    monkeypatch.setattr(flow, "platform_draft",
+                        lambda s: {"drafts": [{
+                            "platform": s["platform"], "text": "post",
+                            "version": 1, "link": None, "media": None,
+                            "tools_offered": []}]})
     monkeypatch.setattr(tp, "plan_trip",
                         lambda *a, **k: {"ok": False, "error": "offline"})
     flow.get_graph.cache_clear()

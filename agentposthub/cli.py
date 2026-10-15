@@ -73,16 +73,18 @@ def cmd_run(args) -> int:
     from .tracing import name_trace
     name_trace(task_id)
     if snap.next and "approve" in snap.next:
-        draft = snap.values["draft"]
         print(f"\nsuspended at the approval gate (next node: {snap.next[0]})")
-        print(f"  task_id:   {task_id}")
-        print(f"  platform:  {args.platform}")
-        print(f"  tools:     {draft.get('tools_offered')}")
-        print(f"  media:     {draft.get('media') or 'text only, no tool call'}")
-        print(f"  draft:     {draft['text']}")
+        print(f"  task_id: {task_id}")
+        for d in snap.values.get("drafts", []):
+            print(f"\n  --- draft [{d['platform']}] ---")
+            print(f"  tools: {d.get('tools_offered')} | "
+                  f"media: {'yes' if d.get('media') else 'no'} | "
+                  f"link: {'yes' if d.get('link') else 'no'}")
+            print(f"  {d['text'][:120]}...")
         print(f"\nreview, then: python -m agentposthub approve {task_id}")
     else:
-        print(f"\nfinished without suspension; state: {snap.values.get('verification')}")
+        print(f"\nfinished; verifications: "
+              f"{snap.values.get('verifications')}")
     return 0
 
 
@@ -105,9 +107,9 @@ def cmd_list(args) -> int:  # noqa: ARG001
                 print(f"  retry:  python -m agentposthub retry {task_id}")
                 print(f"  drop:   python -m agentposthub drop {task_id}")
             else:
-                draft = snap.values["draft"]
                 print(f"{task_id}  [{platform}]  next={gate}")
-                print(f"  draft: {draft['text'][:100]}")
+                for d in snap.values.get("drafts", []):
+                    print(f"  [{d['platform']}] {d['text'][:90]}")
         else:  # ghost index row: clean up
             db.execute("DELETE FROM pending_reviews WHERE task_id=?", (task_id,))
             db.commit()
