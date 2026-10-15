@@ -159,10 +159,11 @@ def publish(platform: str, text: str, req_id: str,
         return {"id": f"dry_run_{req_id}", "ok": True, "req_id": req_id,
                 "via": "dry-run"}
 
-    from .tracing import hex_trace_id
-    tid = trace_id or hex_trace_id(req_id.split("#", 1)[0])  # task part
-    with span("composio_publish", as_type="tool", trace_id=tid,
+    with span("composio_publish", as_type="tool",
               metadata={"action": action, "req_id": req_id}):
+        # created inside the publish node -> OTel context nests it under
+        # publish's span and inherits the task trace; the trace_id param
+        # remains for callers outside any node context
         payload = _execute(action, _publish_params(platform, text, settings),
                            settings)
     message_id = _find_key(payload, "message_id")
@@ -203,13 +204,10 @@ def read_back(platform: str, post_id: str, receipt: dict | None = None,
     if settings.publish_mode == "dry_run":
         return {"visible": True, "reason": "dry-run: nothing was sent"}
 
-    import contextlib
-    from .tracing import hex_trace_id, span
-    tid = trace_id or (hex_trace_id(req_id.split("#", 1)[0])
-                       if req_id else None)
-    with (span("composio_read_back", as_type="tool", trace_id=tid,
-               metadata={"action": action, "post_id": post_id})
-          if tid else contextlib.nullcontext(None)):
+    from .tracing import span
+    with span("composio_read_back", as_type="tool",
+              metadata={"action": action, "post_id": post_id}):
+        # child of verify's span via OTel context; no-op when tracing off
         payload = _execute(action, _read_back_params(platform, post_id, settings),
                            settings)
     seen_ids = {str(v) for v in _find_all_keys(payload, "message_id")}

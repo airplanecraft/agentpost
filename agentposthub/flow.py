@@ -236,10 +236,12 @@ def retrieve_context(state: FlowState, *, store=None) -> dict:
               f"({info.get('failures')} consecutive failures) - skipped")
         return {"grounding": grounding}
 
-    from .tracing import resolve_trace_id, span as trace_span
+    from .tracing import span as trace_span
     with trace_span("site_planner", as_type="tool",
-                    trace_id=resolve_trace_id(state["task_id"], state),
                     input=ask[:200]):
+        # no explicit trace_id: created inside the node, the OTel
+        # context makes this a CHILD of retrieve_context's span and
+        # inherits the trace - the tree shows true nesting
         plan = plan_trip(ask, locale="zh")
     # no_draft is an input-shape problem (the planner asked a clarifying
     # question), not an outage - it must not trip the health breaker
@@ -330,10 +332,9 @@ def generate(state: FlowState) -> dict:
                               "Content-Type": "application/json"})
     msg = None
     usage = None
-    from .tracing import resolve_trace_id, span
+    from .tracing import span
     with span("deepseek_chat", as_type="generation",
-              trace_id=resolve_trace_id(state["task_id"], state),
-              input=prompt[:300]) as obs:
+              input=prompt[:300]) as obs:   # child of generate's span
         for attempt in range(1, 4):  # transient 5xx/timeout: bounded retry
             try:
                 with rq.urlopen(req, timeout=30, context=_ssl_ctx()) as resp:
