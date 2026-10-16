@@ -103,9 +103,8 @@ agentposthub/
   evalharness.py  product eval; evalflow.py — flow benchmark harness
   pricing.py      call-time cost accounting; tracing.py — Langfuse
   cli.py          run/list/show/trace/approve/retry/rules/pause/eval...
-tests/            70 tests (gateway seam mocked, no network)
+tests/            gateway-seam mocked, no network
 docs/             architecture, flow, orchestration, design
-workflow.png      rendered graph (source: workflow.drawio)
 ```
 
 ## Multi-model evaluation
