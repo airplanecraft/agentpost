@@ -13,3 +13,4 @@ __pycache__/
 # os
 .DS_Store
 evalruns/
+aph_vectors/

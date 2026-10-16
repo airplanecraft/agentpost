@@ -20,6 +20,10 @@ def isolated_storage(tmp_path, monkeypatch):
     # empty-string env beats .env loading (dotenv won't override existing
     # vars), keeping tests tracing-off even when the developer's .env
     # carries live langfuse keys
+    monkeypatch.setenv("APH_VECTOR_DIR", str(tmp_path / "vecs"))
+    from agentposthub import vectormem
+    vectormem._client = None
+    vectormem._backend = None
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
     monkeypatch.setenv("AGENT_JUDGE", "")        # judge stays off in tests
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")

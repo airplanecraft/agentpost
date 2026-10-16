@@ -115,6 +115,10 @@ def decide_proposal(store, proposal_key: str, approve: bool) -> bool:
         return False
     store.put(RULE_NS, proposal_key,
               {**rec.value, "status": "approved" if approve else "rejected"})
+    from . import vectormem
+    if approve:
+        vectormem.add("rules", proposal_key, rec.value["rule"],
+                      {"key": proposal_key})
     return True
 
 
@@ -128,6 +132,8 @@ def retire_rule(store, rule_key: str) -> bool:
         return False
     store.put(RULE_NS, rule_key, {**rec.value, "status": "retired",
                                   "retired_at": int(time.time())})
+    from . import vectormem
+    vectormem.delete("rules", rule_key)
     return True
 
 

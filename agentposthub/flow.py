@@ -397,9 +397,18 @@ def platform_draft(state: FlowState) -> dict:
     if len(text) < 80 or looks_like_placeholder(text):
         text, chase_usage = _complete_text(prompt, settings)
 
-    # inline dedup watermark (semantic layer is a stub; hash/regen kept
-    # simple inside the worker - full waterfall is future pgvector work)
-    if _semantic_similarity(text) > 0.92:
+    # semantic dedup: nearest published draft on THIS platform, real
+    # cosine over Qwen embeddings when the vector backend is up;
+    # fixed-low stub keeps the path alive otherwise
+    sim = _semantic_similarity(text)
+    try:
+        from . import vectormem
+        hits = vectormem.similar(f"published_{platform}", text, k=1)
+        if hits:
+            sim = max(sim, hits[0]["sim"])
+    except Exception:
+        pass
+    if sim > 0.92:
         text += " [variant]"
 
     allow_link = PLATFORM_RULES.get(platform, {}).get("allow_link", True)
@@ -612,8 +621,12 @@ def platform_publish(state: FlowState, *, store=None) -> dict:
 
 
 def record_all(state: FlowState) -> dict:
-    """Idempotent ledger write per verified platform (PK task+platform)."""
+    """Idempotent ledger write per verified platform (PK task+platform),
+    plus archival of the published text into vector memory so future
+    drafts can be deduped BY MEANING, not just hash."""
+    from . import vectormem
     db = get_db()
+    drafts = {d["platform"]: d for d in state.get("drafts", [])}
     for v in state.get("verifications", []):
         if v.get("ok") and v.get("comment_id"):
             db.execute(
@@ -622,6 +635,11 @@ def record_all(state: FlowState) -> dict:
                 (state["task_id"], v["platform"], v["comment_id"]))
             print(f"  [record] {state['task_id']} -> {v['platform']} "
                   f"({v['comment_id']})")
+            d = drafts.get(v["platform"])
+            if d and v["platform"] != "reddit":   # reddit skips too
+                vectormem.add(f"published_{v['platform']}",
+                              state["task_id"], d.get("text", ""),
+                              {"task_id": state["task_id"]})
     db.commit()
 
 
