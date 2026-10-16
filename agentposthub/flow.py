@@ -390,9 +390,12 @@ def platform_draft(state: FlowState) -> dict:
         else:
             impl = TOOL_IMPLS[call["name"]]
             media = impl(json.loads(call["arguments"] or "{}"), settings)
-            chase_usage = {}
-            if len(text) < 80 or looks_like_placeholder(text):
-                text, chase_usage = _complete_text(prompt, settings)
+    # chase a real post text in EITHER placeholder shape: the
+    # tool-call announcement (chat models) or the bare announcement
+    # with no tool call at all (reasoning models - found by the
+    # model-swap benchmark: reasoner placeholder_rate hit 1.0)
+    if len(text) < 80 or looks_like_placeholder(text):
+        text, chase_usage = _complete_text(prompt, settings)
 
     # inline dedup watermark (semantic layer is a stub; hash/regen kept
     # simple inside the worker - full waterfall is future pgvector work)
