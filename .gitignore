@@ -14,3 +14,10 @@ __pycache__/
 .DS_Store
 evalruns/
 aph_vectors/
+
+# secrets — variants & credential files
+.env.*
+!.env.example
+*.pem
+credentials*.json
+*-credentials.json
