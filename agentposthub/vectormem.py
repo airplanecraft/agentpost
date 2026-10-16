@@ -16,8 +16,13 @@ import os
 import time
 from pathlib import Path
 
-VECTOR_DIR = Path(os.environ.get("APH_VECTOR_DIR") or "aph_vectors")
 DIMS = 1024
+
+
+def _vector_dir() -> Path:
+    """Read at CALL time so tests (and alternate deployments) can point
+    the store elsewhere via env after import."""
+    return Path(os.environ.get("APH_VECTOR_DIR") or "aph_vectors")
 
 _backend = None          # cached: ("dashscope"|"ollama"|None, name)
 
@@ -79,8 +84,9 @@ def _col(name: str):
     global _client
     import chromadb
     if _client is None:
-        VECTOR_DIR.mkdir(exist_ok=True)
-        _client = chromadb.PersistentClient(path=str(VECTOR_DIR))
+        d = _vector_dir()
+        d.mkdir(exist_ok=True)
+        _client = chromadb.PersistentClient(path=str(d))
     return _client.get_or_create_collection(
         name=name, metadata={"hnsw:space": "cosine"})
 
@@ -93,14 +99,20 @@ def _cos_sim(v1, v2) -> float:
 
 
 def add(collection: str, id_: str, text: str, metadata: dict | None = None):
-    """Embed + upsert one memory entry. No-op when no backend."""
-    vecs = embed([text])
-    if vecs is None:
+    """Embed + upsert one memory entry. No-op when no backend; a backend
+    or store ERROR also degrades to False - vector memory must never
+    fail a task whose ledger write already succeeded."""
+    try:
+        vecs = embed([text])
+        if vecs is None:
+            return False
+        _col(collection).upsert(ids=[id_], documents=[text],
+                                embeddings=[vecs[0]],
+                                metadatas=[metadata or None])
+        return True
+    except Exception as exc:
+        print(f"  [vector] add degraded: {str(exc)[:60]}")
         return False
-    _col(collection).upsert(ids=[id_], documents=[text],
-                            embeddings=[vecs[0]],
-                            metadatas=[metadata or None])
-    return True
 
 
 def delete(collection: str, id_: str):
