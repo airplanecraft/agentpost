@@ -50,6 +50,8 @@ class FlowState(TypedDict):
     retry_count: int               # bounded publish retries after failure
     escalation_action: str         # retry|drop (set by the escalation gate)
     retry_platforms: list          # failed platforms targeted by a retry
+    budget_usd: float              # per-task spend cap
+    spend_usd: Annotated[list[dict], operator.add]   # per-call cost ledger
 
     platform_results: Annotated[list[dict], operator.add]
     verifications: Annotated[list[dict], operator.add]
@@ -380,6 +382,7 @@ def platform_draft(state: FlowState) -> dict:
 
     text = (msg.get("content") or "").strip() or "(tool-only response)"
     media = None
+    chase_usage = {}
     if msg.get("tool_calls"):
         call = msg["tool_calls"][0]["function"]
         if call["name"] not in TOOL_IMPLS:
@@ -387,8 +390,9 @@ def platform_draft(state: FlowState) -> dict:
         else:
             impl = TOOL_IMPLS[call["name"]]
             media = impl(json.loads(call["arguments"] or "{}"), settings)
+            chase_usage = {}
             if len(text) < 80 or looks_like_placeholder(text):
-                text = _complete_text(prompt, settings)
+                text, chase_usage = _complete_text(prompt, settings)
 
     # inline dedup watermark (semantic layer is a stub; hash/regen kept
     # simple inside the worker - full waterfall is future pgvector work)
@@ -400,10 +404,18 @@ def platform_draft(state: FlowState) -> dict:
              "link": "https://1000usdinchina.com/card?x=1" if allow_link else None,
              "media": media, "version": 1,
              "tools_offered": [t["function"]["name"] for t in tools]}
+    from .pricing import cost_from_usage
+    spend = {"call": f"draft:{platform}", "model": settings.deepseek_model,
+             "usd": cost_from_usage(usage),
+             "tokens": (usage or {}).get("total_tokens")}
+    if chase_usage:
+        spend["chase_usd"] = cost_from_usage(chase_usage)
+        spend["usd"] = round(spend["usd"] + spend["chase_usd"], 6)
     print(f"  [draft:{platform}] {len(text)} chars, "
           f"media={'yes' if media else 'no'}, "
-          f"link={'yes' if draft['link'] else 'no'}")
-    return {"drafts": [draft]}
+          f"link={'yes' if draft['link'] else 'no'}, "
+          f"spend=${spend['usd']:.5f}")
+    return {"drafts": [draft], "spend_usd": [spend]}
 
 
 _PLACEHOLDER_MARKS = ("(tool-only response", "(rejected:", "I'll create",
@@ -417,9 +429,10 @@ def looks_like_placeholder(text: str) -> bool:
     return any(m in text for m in _PLACEHOLDER_MARKS)
 
 
-def _complete_text(prompt: str, settings: Settings) -> str:
+def _complete_text(prompt: str, settings: Settings) -> tuple[str, dict]:
     """Tool-free follow-up completion: force the actual post text now that
-    the tool decision (media) has already been captured."""
+    the tool decision (media) has already been captured. Returns
+    (text, usage) so the chase call is billed to the task too."""
     body = {"model": settings.deepseek_model,
             "messages": [{"role": "user",
                           "content": prompt + "\n\nAnswer with the final post "
@@ -432,7 +445,9 @@ def _complete_text(prompt: str, settings: Settings) -> str:
     for attempt in range(1, 4):
         try:
             with rq.urlopen(req, timeout=60, context=_ssl_ctx()) as resp:
-                return json.loads(resp.read())["choices"][0]["message"]["content"].strip()
+                payload = json.loads(resp.read())
+            return (payload["choices"][0]["message"]["content"].strip(),
+                    payload.get("usage") or {})
         except rq.HTTPError as exc:
             if exc.code < 500 or attempt == 3:
                 raise
@@ -504,6 +519,23 @@ def platform_publish(state: FlowState, *, store=None) -> dict:
     platform = state["platform"]
     draft = dict(state["draft"])
     task_id = state["task_id"]
+
+    # kill switch: fail-closed pause of all irreversible actions. A
+    # paused branch is NOT a system failure - it routes to the human
+    # gate, and once the switch is released a retry publishes normally.
+    if store is not None:
+        ks = store.get(("system",), "kill_switch")
+        if ks and ks.value.get("publishing") is False:
+            print(f"  [publish:{platform}] PAUSED by kill switch")
+            return {"platform_results": [{"platform": platform,
+                                          "paused": True, "ok": False,
+                                          "error": "kill_switch_active"}],
+                    "verifications": [{"platform": platform, "ok": False,
+                                       "reason": "kill_switch_active"}],
+                    "failures": [{"platform": platform,
+                                  "node": "platform_publish",
+                                  "reason": "kill_switch_active",
+                                  "attempt": state.get("retry_count", 0)}]}
 
     # hard rules in code, never trusting model output
     if not PLATFORM_RULES.get(platform, {}).get("allow_link", True):
@@ -593,8 +625,20 @@ def record_all(state: FlowState) -> dict:
 # ------------------------------------------------------------------
 # Fan-out routing: the supervisor decisions (no manual selection)
 # ------------------------------------------------------------------
+def _over_budget(state: FlowState) -> bool:
+    from .config import get_settings
+    from .pricing import spent_usd
+    budget = state.get("budget_usd") or get_settings().task_budget_usd
+    return spent_usd(state.get("spend_usd") or []) >= budget
+
+
 def route_drafts(state: FlowState):
-    """After grounding, fan out one draft worker per target platform."""
+    """After grounding, fan out one draft worker per target platform.
+    Budget guard: a task that already burned its cap does not fan out -
+    it routes straight to the escalation gate (the human decides)."""
+    if _over_budget(state):
+        print("  [budget] spend cap reached before drafting - to gate")
+        return "escalate"
     platforms = state.get("platforms") or []
     return [Send("platform_draft", {
         "task_id": state["task_id"], "trace_id": state.get("trace_id", ""),
@@ -605,9 +649,13 @@ def route_drafts(state: FlowState):
 
 def after_approve(state: FlowState):
     """Gate #1 decision: rejected ends the task; approved fans the
-    per-platform publish workers out in parallel."""
+    per-platform publish workers out in parallel. Budget guard applies
+    before the second fan-out too."""
     if state.get("approval") != "approved":
         return END
+    if _over_budget(state):
+        print("  [budget] spend cap reached before publishing - to gate")
+        return "escalate"
     return [Send("platform_publish", {
         "task_id": state["task_id"], "trace_id": state.get("trace_id", ""),
         "platform": d["platform"], "draft": d,
@@ -637,7 +685,16 @@ def escalate(state: FlowState, *, store=None) -> dict:
     drop records incidents and distills. Retries bounded; exhaustion
     forces the drop path."""
     attempts = state.get("retry_count", 0)
-    if attempts < MAX_PUBLISH_RETRIES:
+    from .pricing import spent_usd as _spent
+    spend_line = (f"${_spent(state.get('spend_usd') or []):.4f}"
+                  f"/${state.get('budget_usd') or 0.10:.2f}")
+    if _over_budget(state) and attempts > 0:
+        # deterministic stop: budget burned during retries - no more
+        # interrupts, drop with incidents so it distills
+        print(f"  [budget] cap burned through retries ({spend_line}) - "
+              f"forced drop")
+        decision = {"action": "drop"}
+    elif attempts < MAX_PUBLISH_RETRIES:
         get_db().execute("INSERT OR REPLACE INTO pending_reviews(task_id, platform) "
                          "VALUES(?,?)", (state["task_id"], "escalation"))
         get_db().commit()
@@ -645,6 +702,7 @@ def escalate(state: FlowState, *, store=None) -> dict:
             "ask": "escalation",
             "task_id": state["task_id"],
             "failures": state.get("failures", []),
+            "spend": spend_line,
             "attempts": attempts,
             "max": MAX_PUBLISH_RETRIES,
         })
@@ -663,6 +721,8 @@ def escalate(state: FlowState, *, store=None) -> dict:
     from .distill import (maybe_distill, record_incident,
                           stamp_failed_while_applied)
     for f in state.get("failures", []):
+        if str(f.get("reason", "")).startswith("kill_switch"):
+            continue          # a human pause is not an incident
         record_incident(store, state["task_id"], f.get("platform", "?"),
                         f.get("node", "?"), f.get("reason", "?"))
     lesson_keys = state.get("grounding", {}).get("lesson_keys", [])
@@ -680,6 +740,9 @@ def after_escalate(state: FlowState):
     """retry re-Sends ONLY the failed platforms (their drafts unchanged,
     idempotency keys unchanged)."""
     if state.get("escalation_action") != "retry":
+        return END
+    if _over_budget(state):
+        print("  [budget] cap reached - retry refused")
         return END
     failed = state.get("retry_platforms") or []
     drafts = {d["platform"]: d for d in state.get("drafts", [])}

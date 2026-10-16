@@ -30,12 +30,16 @@ def _cfg(task_id: str) -> dict:
 
 def _invoke_cfg(task_id: str, trace_id: str | None = None,
                 snap_values: dict | None = None) -> dict:
+    """Invoke config: routing + observability + an EXPLICIT superstep
+    cap (framework default was an unexamined coincidence; worst legal
+    path here is ~15 supersteps, we allow 1.6x headroom)."""
     """Invoke config = routing + observability. The trace id is the
     persisted constraint key from FlowState when resuming (read out of
     the checkpoint), or freshly derived at task creation."""
     from .tracing import observe_config, resolve_trace_id
     cfg = _cfg(task_id)
     cfg.update(observe_config(resolve_trace_id(task_id, snap_values)))
+    cfg["recursion_limit"] = get_settings().recursion_limit
     return cfg
 
 
@@ -84,8 +88,11 @@ def cmd_run(args) -> int:
             print(f"  {d['text'][:120]}...")
         print(f"\nreview, then: python -m agentposthub approve {task_id}")
     else:
+        from .pricing import spent_usd
         print(f"\nfinished; verifications: "
               f"{snap.values.get('verifications')}")
+        print(f"spend: ${spent_usd(snap.values.get('spend_usd') or []):.4f} "
+              f"/ budget ${snap.values.get('budget_usd') or 0.10:.2f}")
     return 0
 
 
@@ -274,6 +281,26 @@ def cmd_trace(args) -> int:
     return 0
 
 
+def cmd_pause(args) -> int:
+    """Kill switch: fail-closed pause of every publish worker. Reading
+    and generation continue; irreversible actions stop at the gate."""
+    from .flow import get_store
+    import time as _t
+    get_store().put(("system",), "kill_switch",
+                    {"publishing": False, "at": int(_t.time()),
+                     "reason": args.reason or "manual"})
+    print("KILL SWITCH ON - publishing paused everywhere "
+          "(paused tasks wait at the escalation gate; retry after resume)")
+    return 0
+
+
+def cmd_resume_switch(args) -> int:  # noqa: ARG001
+    from .flow import get_store
+    get_store().put(("system",), "kill_switch", {"publishing": True})
+    print("kill switch released - publishing re-enabled")
+    return 0
+
+
 def cmd_evalflow(args) -> int:
     """Flow-level benchmark: scenario suite x whole-graph runs x metrics.
     Label the run (e.g. the model name) to compare later via --diff."""
@@ -352,6 +379,12 @@ def main(argv: list[str] | None = None) -> int:
     p_ef.add_argument("--diff", nargs=2, metavar=("LABEL_A", "LABEL_B"),
                       help="compare two labelled runs")
     p_ef.set_defaults(fn=cmd_evalflow)
+
+    p_ps = sub.add_parser("pause", help="kill switch: pause all publishing")
+    p_ps.add_argument("--reason", default=None)
+    p_ps.set_defaults(fn=cmd_pause)
+    sub.add_parser("resume", help="release the kill switch").set_defaults(
+        fn=cmd_resume_switch)
 
     p_ru = sub.add_parser("rules", help="distilled rule proposals")
     p_ru.add_argument("--all", action="store_true",

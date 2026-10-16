@@ -20,6 +20,10 @@ class Settings:
     deepseek_api_key: str | None = None
     deepseek_model: str = "deepseek-chat"     # model-swap experiments
     judge_enabled: bool = False               # AGENT_JUDGE=1: LLM quality judge
+    task_budget_usd: float = 0.10             # per-task spend cap
+    recursion_limit: int = 24                 # explicit superstep cap
+    price_in_per_m: float | None = None       # override price table (usd/1M)
+    price_out_per_m: float | None = None
     composio_api_key: str | None = None
     composio_mcp_url: str = "https://connect.composio.dev/mcp"
 
@@ -59,6 +63,12 @@ def load_settings() -> Settings:
         deepseek_model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
         judge_enabled=os.environ.get("AGENT_JUDGE", "").strip().lower()
                       in ("1", "true", "yes"),
+        task_budget_usd=float(os.environ.get("TASK_BUDGET_USD", "0.10")),
+        recursion_limit=int(os.environ.get("APH_RECURSION_LIMIT", "24")),
+        price_in_per_m=(float(os.environ["PRICE_IN_PER_M"])
+                        if os.environ.get("PRICE_IN_PER_M") else None),
+        price_out_per_m=(float(os.environ["PRICE_OUT_PER_M"])
+                         if os.environ.get("PRICE_OUT_PER_M") else None),
         composio_api_key=os.environ.get("COMPOSIO_API_KEY"),
         composio_mcp_url=s_default_mcp(),
         publish_mode=(os.environ.get("PUBLISH_MODE") or "dry_run").strip().lower(),

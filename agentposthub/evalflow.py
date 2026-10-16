@@ -114,7 +114,7 @@ def run_scenario(graph, scenario, label, *, draft_fn=None):
         graph = flow.get_graph()
 
     task_id = f"ef_{label}_{scenario['id']}"
-    cfg = {"configurable": {"thread_id": task_id}}
+    cfg = {"configurable": {"thread_id": task_id}, "recursion_limit": 24}
     cfg.update(observe_config(hex_trace_id(task_id)))
     try:
         t0 = time.time()
